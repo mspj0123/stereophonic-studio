@@ -12,6 +12,9 @@
         .sep-badge.gpu { background:rgba(0,242,255,.15); color:#00f2ff; }
         .sep-badge.cpu { background:rgba(255,203,71,.15); color:#ffcb47; }
         .sep-fname { font-size:12px; color:#00f2ff; display:inline-flex; align-items:center; }
+        .sep-gpu { display:block; font-size:11px; color:#9a9ac8; margin:0 0 12px; cursor:pointer; line-height:1.6; }
+        .sep-gpu input { vertical-align:middle; margin-right:6px; }
+        .sep-gpu.disabled { opacity:.5; }
         .sep-bar { height:8px; background:#161a34; border-radius:4px; overflow:hidden; margin-top:12px; }
         .sep-bar-fill { height:100%; width:0%; background:linear-gradient(90deg,#00f2ff,#c47aff); transition:width .3s; }
         .sep-status { font-size:13px; color:#e0e0ff; line-height:1.6; white-space:pre-line; }
@@ -544,8 +547,9 @@
         <!-- 音源分離（ブラウザ内AI） -->
         <div class="card" id="sepCard">
             <div class="card-title">🎤 音源を分離（ブラウザ内AI・アップロード不要）</div>
-            <p class="sep-note">曲を選ぶと、<b>この端末の中だけ</b>で Demucs AI が vocals / drums / bass / other に分離します。音源が外部サーバーに送られることはありません。分離後は自動で下のプレイヤーに追加され、そのまま立体音響で再生できます。<br>※初回は分離モデル（約172MB）のダウンロードがあります。WebGPU対応ブラウザ（Chrome / Edge）だと高速です。<br>※<b>分離には時間がかかります</b>（初回はモデルDL＋計算で数分になることも）。進捗バーと経過時間が表示されます。<b>終わるまでこのタブを閉じたり「戻る」しないでください。</b><br>※<b>メモリを多く使います</b>。「アプリが終了しました」等で落ちる場合は、<b>PCのChrome/Edge</b>で、<b>他のタブ・アプリを閉じてから</b>、<b>短い曲（まず1〜3分）</b>でお試しください。スマホや低メモリ端末では落ちやすいです。</p>
+            <p class="sep-note">曲を選ぶと、<b>この端末の中だけ</b>で Demucs AI が vocals / drums / bass / other に分離します。音源が外部サーバーに送られることはありません。分離後は自動で下のプレイヤーに追加され、そのまま立体音響で再生できます。<br>※初回は分離モデル（約172MB）のダウンロードがあります。<b>既定はCPUで安定動作</b>します（上のチェックでGPU高速化も任意で試せます）。Chrome / Edge 推奨。<br>※<b>分離には時間がかかります</b>（初回はモデルDL＋計算で数分になることも）。進捗バーと経過時間が表示されます。<b>終わるまでこのタブを閉じたり「戻る」しないでください。</b><br>※<b>メモリを多く使います</b>。「アプリが終了しました」等で落ちる場合は、<b>PCのChrome/Edge</b>で、<b>他のタブ・アプリを閉じてから</b>、<b>短い曲（まず1〜3分）</b>でお試しください。スマホや低メモリ端末では落ちやすいです。</p>
             <div id="sepBackend" class="sep-badge">バックエンド検出中…</div>
+            <label class="sep-gpu" id="sepGpuLabel"><input type="checkbox" id="sepUseGpu"> ⚡ GPUで高速化を試す（対応環境のみ）。<b>ブラウザが落ちる・不安定な場合はチェックを外したまま</b>にしてください（既定はオフ＝安定重視のCPU処理）。</label>
             <div class="player-row">
                 <button class="btn" id="sepPickBtn">＋ 分離する曲を選ぶ</button>
                 <input type="file" id="sepFileInput" accept="audio/*" style="display:none">
@@ -1552,21 +1556,41 @@
     function armUnloadGuard() { window.addEventListener('beforeunload', warnBeforeUnload); }
     function disarmUnloadGuard() { window.removeEventListener('beforeunload', warnBeforeUnload); }
 
-    async function detectBackend() {
-        if ('gpu' in navigator) {
-            try { if (await navigator.gpu.requestAdapter()) backend = 'webgpu'; } catch (e) {}
-        }
-        // クロスオリジン分離が無いと WASM マルチスレッドは使えない → 1スレッドに落とす
-        ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
-        if (backend === 'webgpu') {
-            ort.env.webgpu = ort.env.webgpu || {};
-            ort.env.webgpu.powerPreference = 'high-performance';
-            backendEl.textContent = 'WebGPU（GPU・高速）';
+    const gpuCheckbox = $('sepUseGpu');
+    let gpuAvailable = false;
+
+    // 実際に使うバックエンド：GPUは「対応あり かつ チェックON」のときだけ。既定は安定重視のCPU(WASM)。
+    function desiredBackend() { return (gpuAvailable && gpuCheckbox.checked) ? 'webgpu' : 'wasm'; }
+
+    function updateBadge() {
+        const d = desiredBackend();
+        backendEl.classList.remove('gpu', 'cpu');
+        if (d === 'webgpu') {
+            backendEl.textContent = '⚡ WebGPU（高速・実験的）';
             backendEl.classList.add('gpu');
         } else {
-            backendEl.textContent = `WebAssembly（CPU ${ort.env.wasm.numThreads}スレッド・低速）`;
+            backendEl.textContent = gpuAvailable
+                ? 'CPU方式（安定・既定）※上のチェックでGPU高速化も試せます'
+                : `CPU方式（安定・この端末のGPU高速化は非対応）`;
             backendEl.classList.add('cpu');
         }
+    }
+
+    async function detectBackend() {
+        ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
+        if ('gpu' in navigator) {
+            try { gpuAvailable = !!(await navigator.gpu.requestAdapter()); } catch (e) { gpuAvailable = false; }
+        }
+        if (!gpuAvailable) {
+            gpuCheckbox.disabled = true;
+            $('sepGpuLabel').classList.add('disabled');
+        }
+        gpuCheckbox.addEventListener('change', () => {
+            // 選択が変わったら次回の分離で読み直す（EPが変わるため）
+            if (loadedBackend && loadedBackend !== desiredBackend()) modelLoaded = false;
+            updateBadge();
+        });
+        updateBadge();
     }
 
     let triedWasmFallback = false;
@@ -1598,9 +1622,16 @@
         modelLoaded = true;
     }
 
+    let loadedBackend = null;
     async function ensureModel() {
-        if (modelLoaded) return;
-        await loadProcessor(); // 既定: WebGPU優先→WASM
+        const d = desiredBackend();
+        if (modelLoaded && loadedBackend === d) return;
+        backend = d;
+        if (d === 'webgpu') { ort.env.webgpu = ort.env.webgpu || {}; ort.env.webgpu.powerPreference = 'high-performance'; }
+        ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
+        modelLoaded = false;
+        await loadProcessor(d === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm']);
+        loadedBackend = d;
     }
 
     function resample(ch, fromRate, toRate, targetLen) {
@@ -1667,6 +1698,7 @@
                     ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
                     modelLoaded = false;
                     await loadProcessor(['wasm']);
+                    loadedBackend = 'wasm';
                     tracks = await processor.separate(L, R);
                 } else {
                     throw sepErr;
