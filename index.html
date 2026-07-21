@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stereophonic Studio — 音源分離＆立体音響プレイヤー</title>
+<!-- 静的ホスト(GitHub Pages等)でクロスオリジン分離を有効化（SharedArrayBuffer用・MIT） -->
+<script src="coi-serviceworker.js"></script>
+<style>
+    * { box-sizing: border-box; }
+    body {
+        font-family: 'Segoe UI', sans-serif;
+        background: linear-gradient(135deg, #0a0a14 0%, #14142b 100%);
+        color: #fff; margin: 0; padding: 0; min-height: 100vh;
+    }
+    .topbar {
+        display: flex; align-items: center; gap: 12px; padding: 18px 24px;
+        border-bottom: 1px solid rgba(0,242,255,0.15); background: rgba(10,10,24,0.6);
+    }
+    .logo { font-size: 18px; font-weight: 300; letter-spacing: 3px; color: #e0e0ff; }
+    .logo span { color: #00f2ff; font-weight: 600; }
+    .container { max-width: 820px; margin: 0 auto; padding: 24px; }
+    .card {
+        background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 14px; padding: 22px; margin-bottom: 18px;
+    }
+    .hero { text-align: center; border-color: rgba(0,242,255,0.25); }
+    .hero h2 { font-size: 20px; }
+    h2 { font-size: 15px; font-weight: 600; color: #e0e0ff; margin: 0 0 6px; letter-spacing: 1px; }
+    .sub { font-size: 12px; color: #8888aa; margin: 0 0 16px; line-height: 1.7; }
+    .song {
+        display: flex; align-items: center; gap: 14px;
+        background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
+    }
+    .song .meta { flex: 1; min-width: 0; }
+    .song .title { font-size: 14px; color: #fff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .song .info { font-size: 11px; color: #8888aa; margin-top: 3px; }
+    .btn {
+        border: none; padding: 11px 22px; border-radius: 8px; cursor: pointer;
+        font-weight: 600; font-size: 14px; text-decoration: none; display: inline-block;
+        background: linear-gradient(135deg, #00f2ff, #c47aff); color: #0a0a14;
+    }
+    .btn:hover { filter: brightness(1.1); }
+    .btn.play { font-size: 13px; padding: 9px 18px; background: linear-gradient(135deg, #00c853, #00a040); color: #fff; }
+    .empty { text-align: center; color: #6666aa; font-size: 13px; padding: 24px; line-height: 1.8; }
+    code { background: rgba(0,0,0,0.5); padding: 2px 6px; border-radius: 4px; color: #ffcb47; font-size: 12px; }
+    .note { font-size: 11px; color: #7777a0; line-height: 1.7; margin-top: 10px; }
+</style>
+</head>
+<body>
+    <div class="topbar">
+        <div class="logo">STEREOPHONIC <span>STUDIO</span></div>
+    </div>
+    <div class="container">
+        <!-- 分離への導線 -->
+        <div class="card hero">
+            <h2>🎤 音源を分離して立体音響で聴く</h2>
+            <p class="sub">曲をアップロードせず、<b>あなたのブラウザの中だけ</b>で AI（Demucs）が
+                ボーカル・ドラム・ベース等に分離します。音源は外部に送信されません。<br>
+                分離した各パートを 3D 空間に配置して再生できます。</p>
+            <a class="btn" href="player.html">分離してプレイヤーを開く →</a>
+            <p class="note">※ Chrome / Edge 推奨（WebGPUで高速）。初回のみ分離モデル（約172MB）を読み込みます。
+                曲の長さと端末性能により分離に数十秒〜数分かかります。</p>
+        </div>
+
+        <!-- 共有ライブラリ -->
+        <div class="card">
+            <h2>共有ライブラリ</h2>
+            <p class="sub">みんなで聴ける分離済みの曲です。「▶ 再生」で立体音響プレイヤーが開きます。</p>
+            <div id="list"><div class="empty">読み込み中…</div></div>
+        </div>
+    </div>
+
+<script>
+    function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+    fetch('library.json', { cache: 'no-store' })
+        .then(r => { if (!r.ok) throw new Error('no library'); return r.json(); })
+        .then(lib => {
+            const songs = (lib && lib.songs) || [];
+            const list = document.getElementById('list');
+            if (!songs.length) {
+                list.innerHTML = '<div class="empty">まだ共有された曲はありません。<br>' +
+                    '上の「分離してプレイヤーを開く」から、自分の曲を分離して再生できます。</div>';
+                return;
+            }
+            list.innerHTML = songs.map(s => `
+                <div class="song">
+                    <div class="meta">
+                        <div class="title">${escapeHtml(s.name || s.id)}</div>
+                        <div class="info">${(s.stems||[]).length} トラック</div>
+                    </div>
+                    <a class="btn play" href="player.html?song=${encodeURIComponent(s.id)}">▶ 再生</a>
+                </div>`).join('');
+        })
+        .catch(() => {
+            document.getElementById('list').innerHTML =
+                '<div class="empty">まだ共有された曲はありません。<br>' +
+                '上の「分離してプレイヤーを開く」から、自分の曲を分離して再生できます。</div>';
+        });
+</script>
+</body>
+</html>
