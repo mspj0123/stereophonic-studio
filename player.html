@@ -14,7 +14,20 @@
         .sep-fname { font-size:12px; color:#00f2ff; display:inline-flex; align-items:center; }
         .sep-bar { height:8px; background:#161a34; border-radius:4px; overflow:hidden; margin-top:12px; }
         .sep-bar-fill { height:100%; width:0%; background:linear-gradient(90deg,#00f2ff,#c47aff); transition:width .3s; }
-        .sep-status { font-size:12px; color:#9a9ac8; margin-top:8px; white-space:pre-line; line-height:1.6; }
+        .sep-status { font-size:13px; color:#e0e0ff; line-height:1.6; white-space:pre-line; }
+        .sep-working { display:flex; gap:14px; align-items:center; margin-top:14px; padding:14px;
+            background:rgba(0,242,255,.06); border:1px solid rgba(0,242,255,.28); border-radius:10px; }
+        .sep-working > .sep-main { flex:1; min-width:0; }
+        .sep-spinner { width:30px; height:30px; flex:none; border:3px solid rgba(0,242,255,.2);
+            border-top-color:#00f2ff; border-radius:50%; animation:sepspin .9s linear infinite; }
+        @keyframes sepspin { to { transform:rotate(360deg); } }
+        .sep-elapsed { font-size:11px; color:#7fb8ff; margin-top:6px; font-variant-numeric:tabular-nums; }
+        .sep-bar-fill.indet { width:40% !important; border-radius:4px;
+            animation:sepindet 1.1s ease-in-out infinite; }
+        @keyframes sepindet { 0%{margin-left:-42%;} 100%{margin-left:100%;} }
+        .sep-warn { font-size:12px; color:#ffcb47; margin-top:10px; line-height:1.6;
+            background:rgba(255,203,71,.08); border:1px solid rgba(255,203,71,.25);
+            border-radius:8px; padding:9px 12px; }
         * { box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', sans-serif;
@@ -531,7 +544,7 @@
         <!-- 音源分離（ブラウザ内AI） -->
         <div class="card" id="sepCard">
             <div class="card-title">🎤 音源を分離（ブラウザ内AI・アップロード不要）</div>
-            <p class="sep-note">曲を選ぶと、<b>この端末の中だけ</b>で Demucs AI が vocals / drums / bass / other に分離します。音源が外部サーバーに送られることはありません。分離後は自動で下のプレイヤーに追加され、そのまま立体音響で再生できます。<br>※初回は分離モデル（約172MB）のダウンロードがあります。WebGPU対応ブラウザ（Chrome / Edge）だと高速です。</p>
+            <p class="sep-note">曲を選ぶと、<b>この端末の中だけ</b>で Demucs AI が vocals / drums / bass / other に分離します。音源が外部サーバーに送られることはありません。分離後は自動で下のプレイヤーに追加され、そのまま立体音響で再生できます。<br>※初回は分離モデル（約172MB）のダウンロードがあります。WebGPU対応ブラウザ（Chrome / Edge）だと高速です。<br>※<b>分離には時間がかかります</b>（初回はモデルDL＋計算で数分になることも）。進捗バーと経過時間が表示されます。<b>終わるまでこのタブを閉じたり「戻る」しないでください。</b></p>
             <div id="sepBackend" class="sep-badge">バックエンド検出中…</div>
             <div class="player-row">
                 <button class="btn" id="sepPickBtn">＋ 分離する曲を選ぶ</button>
@@ -539,8 +552,15 @@
                 <span id="sepFileName" class="sep-fname"></span>
             </div>
             <div id="sepProgressWrap" style="display:none">
-                <div class="sep-bar"><div id="sepBar" class="sep-bar-fill"></div></div>
-                <div id="sepStatus" class="sep-status"></div>
+                <div class="sep-working">
+                    <div class="sep-spinner" id="sepSpinner"></div>
+                    <div class="sep-main">
+                        <div id="sepStatus" class="sep-status">準備中…</div>
+                        <div class="sep-bar"><div id="sepBar" class="sep-bar-fill"></div></div>
+                        <div class="sep-elapsed" id="sepElapsed">経過時間 0:00</div>
+                    </div>
+                </div>
+                <div class="sep-warn" id="sepWarn">⚠ 分離が終わるまで、このタブを<b>閉じたり・リロード・「戻る」</b>をしないでください（分離が中断され、最初からやり直しになります）。</div>
             </div>
         </div>
 
@@ -1507,10 +1527,30 @@
     const bar = $('sepBar');
     const statusEl = $('sepStatus');
 
+    const spinnerEl = $('sepSpinner');
+    const elapsedEl = $('sepElapsed');
     let processor = null, modelLoaded = false, backend = 'wasm', sepCtx = null, busy = false;
+    let elapsedTimer = null, startedAt = 0;
 
     const setStatus = (m) => { statusEl.textContent = m; };
-    const setBar = (p) => { bar.style.width = Math.max(0, Math.min(100, p)) + '%'; };
+    const setBar = (p) => { bar.classList.remove('indet'); bar.style.width = Math.max(0, Math.min(100, p)) + '%'; };
+    const setBarIndet = () => { bar.style.width = '40%'; bar.classList.add('indet'); };
+
+    const fmtMMSS = (s) => Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    function startElapsed() {
+        startedAt = Date.now();
+        elapsedEl.textContent = '経過時間 0:00';
+        stopElapsed();
+        elapsedTimer = setInterval(() => {
+            elapsedEl.textContent = '経過時間 ' + fmtMMSS(Math.floor((Date.now() - startedAt) / 1000));
+        }, 1000);
+    }
+    function stopElapsed() { if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; } }
+
+    // 分離中にタブを閉じる/リロード/戻る際の警告
+    function warnBeforeUnload(e) { e.preventDefault(); e.returnValue = ''; return ''; }
+    function armUnloadGuard() { window.addEventListener('beforeunload', warnBeforeUnload); }
+    function disarmUnloadGuard() { window.removeEventListener('beforeunload', warnBeforeUnload); }
 
     async function detectBackend() {
         if ('gpu' in navigator) {
@@ -1529,22 +1569,31 @@
         }
     }
 
-    async function ensureModel() {
-        if (modelLoaded) return;
-        processor = new DemucsProcessor({
+    let triedWasmFallback = false;
+
+    async function loadProcessor(execProviders) {
+        const opts = {
             ort,
             onProgress: ({ progress, currentSegment, totalSegments }) => {
-                setBar(5 + progress * 90);
-                setStatus(`分離中… ${(progress * 100).toFixed(0)}%   (区間 ${currentSegment}/${totalSegments})`);
+                setBar(progress * 100);
+                setStatus(`②AIが分離を計算中… ${(progress * 100).toFixed(0)}%  （パート ${currentSegment}/${totalSegments}）`);
             },
             onDownloadProgress: (loaded, total) => {
                 setBar(total ? loaded / total * 100 : 0);
-                setStatus(`分離モデルをダウンロード中…（初回のみ） ${(loaded / 1048576).toFixed(0)}MB / ${(total / 1048576).toFixed(0)}MB`);
+                setStatus(`①分離モデルを準備中（初回だけ・以後は不要）… ${(loaded / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MB`);
             }
-        });
-        setStatus('分離モデルを読み込み中…（初回のみ約172MB）');
+        };
+        if (execProviders) opts.sessionOptions = { executionProviders: execProviders };
+        processor = new DemucsProcessor(opts);
+        setStatus('①分離モデルを準備中（初回だけ約172MB・数分かかることがあります）…');
+        setBarIndet();
         await processor.loadModel(DEFAULT_MODEL_URL);
         modelLoaded = true;
+    }
+
+    async function ensureModel() {
+        if (modelLoaded) return;
+        await loadProcessor(); // 既定: WebGPU優先→WASM
     }
 
     function resample(ch, fromRate, toRate, targetLen) {
@@ -1559,13 +1608,21 @@
 
     async function run(file) {
         if (busy) return;
-        busy = true; pickBtn.disabled = true;
+        busy = true;
+        pickBtn.disabled = true;
+        pickBtn.textContent = '分離中…（お待ちください）';
         progWrap.style.display = 'block';
+        spinnerEl.style.display = 'block';
+        document.getElementById('sepWarn').style.display = '';
         fnameEl.textContent = file.name;
+        startElapsed();
+        armUnloadGuard();
+        // 進捗が確実に見えるよう、分離パネルまでスクロール
+        try { document.getElementById('sepCard').scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {}
         const t0 = Date.now();
         try {
             if (!sepCtx) sepCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
-            setStatus('音声を読み込み中…'); setBar(2);
+            setStatus('🎵 音声ファイルを読み込んでいます…'); setBarIndet();
             const buf = await sepCtx.decodeAudioData(await file.arrayBuffer());
 
             let L = buf.getChannelData(0);
@@ -1577,8 +1634,29 @@
             }
 
             await ensureModel();
-            setStatus('分離中…（曲の長さと端末性能により数分かかります。画面はこのままで大丈夫です）');
-            const tracks = await processor.separate(L, R);
+            setStatus('②AIが分離を計算中…（曲の長さと端末性能により数十秒〜数分。このまま少しお待ちください）');
+            setBarIndet();
+            let tracks;
+            try {
+                tracks = await processor.separate(L, R);
+            } catch (sepErr) {
+                // WebGPUで失敗したら CPU(WASM) 方式で1回だけ再試行（端末差の保険）
+                if (backend === 'webgpu' && !triedWasmFallback) {
+                    triedWasmFallback = true;
+                    backend = 'wasm';
+                    console.warn('WebGPU separation failed, retrying with WASM:', sepErr);
+                    backendEl.textContent = 'WebAssembly（CPU・自動切替）';
+                    backendEl.classList.remove('gpu'); backendEl.classList.add('cpu');
+                    setStatus('WebGPUで問題が発生したため、CPU方式に切り替えて再試行します…（少し時間がかかります）');
+                    setBarIndet();
+                    ort.env.wasm.numThreads = self.crossOriginIsolated ? (navigator.hardwareConcurrency || 4) : 1;
+                    modelLoaded = false;
+                    await loadProcessor(['wasm']);
+                    tracks = await processor.separate(L, R);
+                } else {
+                    throw sepErr;
+                }
+            }
 
             // Float32 → AudioBuffer（プレイヤーと同じ AudioContext で作る）
             const ctx = (window.getAudioCtxForStems ? window.getAudioCtxForStems() : sepCtx);
@@ -1596,12 +1674,21 @@
 
             const secs = ((Date.now() - t0) / 1000).toFixed(0);
             setBar(100);
-            setStatus(`✅ 分離完了（${secs}秒）。下のプレイヤーに ${list.length} ステムを追加しました。「▶ 再生」を押し、「立体音響」をONにしてみてください。`);
+            elapsedEl.textContent = '所要時間 ' + fmtMMSS(+secs);
+            document.getElementById('sepWarn').style.display = 'none';
+            setStatus(`✅ 分離完了（${fmtMMSS(+secs)}）。下のプレイヤーに ${list.length} パート（vocals / drums / bass / other）を追加しました。「▶ 再生」を押し、「立体音響」をONにしてみてください。`);
         } catch (e) {
             console.error(e);
-            setStatus('❌ 失敗: ' + (e && e.message ? e.message : e) + '\n（WebGPU非対応や低メモリ端末では失敗することがあります。短い曲でお試しください）');
+            bar.classList.remove('indet'); bar.style.width = '0%';
+            setStatus('❌ 分離に失敗しました: ' + (e && e.message ? e.message : e) + '\n（この端末・ブラウザ、または非常に長い曲でメモリ不足の可能性。短い曲／Chrome・Edgeでお試しください。このメッセージ全文を教えていただければ調べます）');
         } finally {
-            busy = false; pickBtn.disabled = false; fileInput.value = '';
+            stopElapsed();
+            disarmUnloadGuard();
+            spinnerEl.style.display = 'none';
+            busy = false;
+            pickBtn.disabled = false;
+            pickBtn.textContent = '＋ 分離する曲を選ぶ';
+            fileInput.value = '';
         }
     }
 
