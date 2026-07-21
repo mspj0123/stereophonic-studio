@@ -1587,6 +1587,13 @@
         }
         gpuCheckbox.addEventListener('change', updateBadge);
         updateBadge();
+
+        const dm = navigator.deviceMemory;
+        if (dm && dm <= 4) {
+            const note = document.querySelector('#sepCard .sep-note');
+            if (note) note.insertAdjacentHTML('beforeend',
+                `<br><span style="color:#ff8a8a">⚠ この端末はメモリが少なめ（約${dm}GB）です。長い曲だと落ちやすいので、<b>まず1〜2分の曲</b>で、他タブを閉じてお試しください。</span>`);
+        }
     }
 
     // === 分離用 Web Worker（重い処理をUIスレッド外で実行） ===
@@ -1649,11 +1656,13 @@
             const buf = await sepCtx.decodeAudioData(await file.arrayBuffer());
 
             const durMin = buf.duration / 60;
-            if (durMin > 10) {
-                throw new Error(`曲が長すぎます（約${durMin.toFixed(1)}分）。メモリ不足でブラウザが落ちる可能性が高いため、まずは10分以内（できれば1〜3分）の曲でお試しください。`);
+            const lowMem = (navigator.deviceMemory && navigator.deviceMemory <= 4);
+            const cap = lowMem ? 3 : 6;   // 低メモリ端末はさらに短く
+            if (durMin > cap) {
+                throw new Error(`曲が長い（約${durMin.toFixed(1)}分）ため、この端末ではメモリ不足でブラウザが強制終了する恐れがあります。${cap}分以内（できれば1〜2分）の曲でお試しください。長い曲を分離したい場合は、下の案内のとおりPC上のColabで分離し結果を再生する方法が確実です。`);
             }
-            if (durMin > 5) {
-                setStatus(`⚠ 長め（約${durMin.toFixed(1)}分）の曲です。メモリに余裕が無い端末では落ちることがあります。そのまま続行します…`);
+            if (durMin > 2) {
+                setStatus(`⚠ 約${durMin.toFixed(1)}分の曲です。メモリに余裕が無いと落ちることがあります（落ちたら他タブを閉じ、より短い曲で）。続行します…`);
             }
 
             // チャンネルデータを独立 Float32Array にコピー（Workerへ転送するため）
