@@ -1518,10 +1518,9 @@
 
 <!-- ▼ ブラウザ内音源分離（Demucs / ONNX Runtime Web）— コードはMIT: vendor/demucs-web/ -->
 <script type="module">
-    import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.all.mjs';
-    import { DemucsProcessor, CONSTANTS } from './vendor/demucs-web/index.js';
-
-    const { SAMPLE_RATE, DEFAULT_MODEL_URL } = CONSTANTS;
+    // 重い分離処理は separator-worker.js（Web Worker）側で実行する。
+    // これによりUIスレッドが空くので「ページが応答しません」が出ず、スピナー等も滑らかに動く。
+    const SAMPLE_RATE = 44100;
     const $ = (id) => document.getElementById(id);
     const backendEl = $('sepBackend');
     const pickBtn = $('sepPickBtn');
@@ -1533,7 +1532,7 @@
 
     const spinnerEl = $('sepSpinner');
     const elapsedEl = $('sepElapsed');
-    let processor = null, modelLoaded = false, backend = 'wasm', sepCtx = null, busy = false;
+    let sepCtx = null, busy = false;
     let elapsedTimer = null, startedAt = 0;
 
     const setStatus = (m) => { statusEl.textContent = m; };
@@ -1576,8 +1575,9 @@
         }
     }
 
+    function wasmThreads() { return self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1; }
+
     async function detectBackend() {
-        ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
         if ('gpu' in navigator) {
             try { gpuAvailable = !!(await navigator.gpu.requestAdapter()); } catch (e) { gpuAvailable = false; }
         }
@@ -1585,63 +1585,48 @@
             gpuCheckbox.disabled = true;
             $('sepGpuLabel').classList.add('disabled');
         }
-        gpuCheckbox.addEventListener('change', () => {
-            // 選択が変わったら次回の分離で読み直す（EPが変わるため）
-            if (loadedBackend && loadedBackend !== desiredBackend()) modelLoaded = false;
-            updateBadge();
-        });
+        gpuCheckbox.addEventListener('change', updateBadge);
         updateBadge();
     }
 
-    let triedWasmFallback = false;
-
-    async function loadProcessor(execProviders) {
-        const eps = execProviders || (backend === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm']);
-        const opts = {
-            ort,
-            // メモリ使用量を抑える設定（低メモリ端末でのクラッシュ対策）
-            sessionOptions: {
-                executionProviders: eps,
-                graphOptimizationLevel: 'basic',
-                enableCpuMemArena: false,
-                enableMemPattern: false
-            },
-            onProgress: ({ progress, currentSegment, totalSegments }) => {
-                setBar(progress * 100);
-                setStatus(`②AIが分離を計算中… ${(progress * 100).toFixed(0)}%  （パート ${currentSegment}/${totalSegments}）`);
-            },
-            onDownloadProgress: (loaded, total) => {
-                setBar(total ? loaded / total * 100 : 0);
-                setStatus(`①分離モデルを準備中（初回だけ・以後は不要）… ${(loaded / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MB`);
-            }
-        };
-        processor = new DemucsProcessor(opts);
-        setStatus('①分離モデルを準備中（初回だけ約172MB・数分かかることがあります）…');
-        setBarIndet();
-        await processor.loadModel(DEFAULT_MODEL_URL);
-        modelLoaded = true;
+    // === 分離用 Web Worker（重い処理をUIスレッド外で実行） ===
+    let worker = null;
+    function getWorker() {
+        if (!worker) worker = new Worker('separator-worker.js', { type: 'module' });
+        return worker;
     }
 
-    let loadedBackend = null;
-    async function ensureModel() {
-        const d = desiredBackend();
-        if (modelLoaded && loadedBackend === d) return;
-        backend = d;
-        if (d === 'webgpu') { ort.env.webgpu = ort.env.webgpu || {}; ort.env.webgpu.powerPreference = 'high-performance'; }
-        ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
-        modelLoaded = false;
-        await loadProcessor(d === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm']);
-        loadedBackend = d;
-    }
-
-    function resample(ch, fromRate, toRate, targetLen) {
-        const ratio = toRate / fromRate;
-        const out = new Float32Array(targetLen);
-        for (let i = 0; i < targetLen; i++) {
-            const src = i / ratio, i0 = Math.floor(src), i1 = Math.min(i0 + 1, ch.length - 1);
-            out[i] = ch[i0] * (1 - (src - i0)) + ch[i1] * (src - i0);
-        }
-        return out;
+    // 1曲を Worker で分離。進捗はステータス/バーへ反映。成功で {vocals,drums,bass,other} を返す。
+    function separateWithWorker(left, right, sampleRate, useGpu) {
+        return new Promise((resolve, reject) => {
+            const w = getWorker();
+            const onMsg = (ev) => {
+                const m = ev.data || {};
+                if (m.type === 'download') {
+                    setBar(m.total ? m.loaded / m.total * 100 : 0);
+                    setStatus(`①分離モデルを準備中（初回だけ・以後は不要）… ${(m.loaded / 1048576).toFixed(0)} / ${(m.total / 1048576).toFixed(0)} MB`);
+                } else if (m.type === 'phase') {
+                    if (m.phase === 'loadmodel') { setStatus('①分離モデルを準備中（初回だけ約172MB・数分かかることがあります）…'); setBarIndet(); }
+                    else if (m.phase === 'resample') { setStatus('🎵 音声を変換しています…'); setBarIndet(); }
+                    else if (m.phase === 'separate') { setStatus('②AIが分離を計算中…（曲の長さと端末性能により数十秒〜数分。このままお待ちください）'); setBarIndet(); }
+                } else if (m.type === 'progress') {
+                    setBar(m.progress * 100);
+                    setStatus(`②AIが分離を計算中… ${(m.progress * 100).toFixed(0)}%  （パート ${m.currentSegment}/${m.totalSegments}）`);
+                } else if (m.type === 'done') {
+                    w.removeEventListener('message', onMsg);
+                    resolve(m.tracks);
+                } else if (m.type === 'error') {
+                    w.removeEventListener('message', onMsg);
+                    reject(Object.assign(new Error(m.message), { usedGpu: m.usedGpu }));
+                }
+            };
+            w.addEventListener('message', onMsg);
+            // L/R は Worker へ「転送」して所有権を渡す（コピーを作らず省メモリ）
+            w.postMessage(
+                { type: 'separate', left, right, sampleRate, useGpu, threads: wasmThreads() },
+                [left.buffer, right.buffer]
+            );
+        });
     }
 
     async function run(file) {
@@ -1671,37 +1656,27 @@
                 setStatus(`⚠ 長め（約${durMin.toFixed(1)}分）の曲です。メモリに余裕が無い端末では落ちることがあります。そのまま続行します…`);
             }
 
-            let L = buf.getChannelData(0);
-            let R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
-            if (buf.sampleRate !== SAMPLE_RATE) {
-                const newLen = Math.floor(L.length * SAMPLE_RATE / buf.sampleRate);
-                L = resample(L, buf.sampleRate, SAMPLE_RATE, newLen);
-                R = resample(R, buf.sampleRate, SAMPLE_RATE, newLen);
-            }
+            // チャンネルデータを独立 Float32Array にコピー（Workerへ転送するため）
+            const L = new Float32Array(buf.getChannelData(0));
+            const R = new Float32Array(buf.numberOfChannels > 1 ? buf.getChannelData(1) : buf.getChannelData(0));
 
-            await ensureModel();
-            setStatus('②AIが分離を計算中…（曲の長さと端末性能により数十秒〜数分。このまま少しお待ちください）');
-            setBarIndet();
+            const useGpu = (gpuAvailable && gpuCheckbox.checked);
             let tracks;
             try {
-                tracks = await processor.separate(L, R);
-            } catch (sepErr) {
-                // WebGPUで失敗したら CPU(WASM) 方式で1回だけ再試行（端末差の保険）
-                if (backend === 'webgpu' && !triedWasmFallback) {
-                    triedWasmFallback = true;
-                    backend = 'wasm';
-                    console.warn('WebGPU separation failed, retrying with WASM:', sepErr);
-                    backendEl.textContent = 'WebAssembly（CPU・自動切替）';
-                    backendEl.classList.remove('gpu'); backendEl.classList.add('cpu');
-                    setStatus('WebGPUで問題が発生したため、CPU方式に切り替えて再試行します…（少し時間がかかります）');
+                tracks = await separateWithWorker(L, R, buf.sampleRate, useGpu);
+            } catch (err) {
+                if (err && err.usedGpu) {
+                    // GPUで失敗 → Workerを作り直して CPU(WASM) 方式でやり直し（L/Rは転送済みのため再デコード）
+                    console.warn('GPU separation failed, retry with CPU:', err);
+                    setStatus('GPUで問題が発生したため、CPU方式で最初からやり直します…');
                     setBarIndet();
-                    ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
-                    modelLoaded = false;
-                    await loadProcessor(['wasm']);
-                    loadedBackend = 'wasm';
-                    tracks = await processor.separate(L, R);
+                    if (worker) { worker.terminate(); worker = null; }
+                    const buf2 = await sepCtx.decodeAudioData(await file.arrayBuffer());
+                    const L2 = new Float32Array(buf2.getChannelData(0));
+                    const R2 = new Float32Array(buf2.numberOfChannels > 1 ? buf2.getChannelData(1) : buf2.getChannelData(0));
+                    tracks = await separateWithWorker(L2, R2, buf2.sampleRate, false);
                 } else {
-                    throw sepErr;
+                    throw err;
                 }
             }
 
