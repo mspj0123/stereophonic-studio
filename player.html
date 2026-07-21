@@ -544,7 +544,7 @@
         <!-- 音源分離（ブラウザ内AI） -->
         <div class="card" id="sepCard">
             <div class="card-title">🎤 音源を分離（ブラウザ内AI・アップロード不要）</div>
-            <p class="sep-note">曲を選ぶと、<b>この端末の中だけ</b>で Demucs AI が vocals / drums / bass / other に分離します。音源が外部サーバーに送られることはありません。分離後は自動で下のプレイヤーに追加され、そのまま立体音響で再生できます。<br>※初回は分離モデル（約172MB）のダウンロードがあります。WebGPU対応ブラウザ（Chrome / Edge）だと高速です。<br>※<b>分離には時間がかかります</b>（初回はモデルDL＋計算で数分になることも）。進捗バーと経過時間が表示されます。<b>終わるまでこのタブを閉じたり「戻る」しないでください。</b></p>
+            <p class="sep-note">曲を選ぶと、<b>この端末の中だけ</b>で Demucs AI が vocals / drums / bass / other に分離します。音源が外部サーバーに送られることはありません。分離後は自動で下のプレイヤーに追加され、そのまま立体音響で再生できます。<br>※初回は分離モデル（約172MB）のダウンロードがあります。WebGPU対応ブラウザ（Chrome / Edge）だと高速です。<br>※<b>分離には時間がかかります</b>（初回はモデルDL＋計算で数分になることも）。進捗バーと経過時間が表示されます。<b>終わるまでこのタブを閉じたり「戻る」しないでください。</b><br>※<b>メモリを多く使います</b>。「アプリが終了しました」等で落ちる場合は、<b>PCのChrome/Edge</b>で、<b>他のタブ・アプリを閉じてから</b>、<b>短い曲（まず1〜3分）</b>でお試しください。スマホや低メモリ端末では落ちやすいです。</p>
             <div id="sepBackend" class="sep-badge">バックエンド検出中…</div>
             <div class="player-row">
                 <button class="btn" id="sepPickBtn">＋ 分離する曲を選ぶ</button>
@@ -1557,7 +1557,7 @@
             try { if (await navigator.gpu.requestAdapter()) backend = 'webgpu'; } catch (e) {}
         }
         // クロスオリジン分離が無いと WASM マルチスレッドは使えない → 1スレッドに落とす
-        ort.env.wasm.numThreads = self.crossOriginIsolated ? (navigator.hardwareConcurrency || 4) : 1;
+        ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
         if (backend === 'webgpu') {
             ort.env.webgpu = ort.env.webgpu || {};
             ort.env.webgpu.powerPreference = 'high-performance';
@@ -1572,8 +1572,16 @@
     let triedWasmFallback = false;
 
     async function loadProcessor(execProviders) {
+        const eps = execProviders || (backend === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm']);
         const opts = {
             ort,
+            // メモリ使用量を抑える設定（低メモリ端末でのクラッシュ対策）
+            sessionOptions: {
+                executionProviders: eps,
+                graphOptimizationLevel: 'basic',
+                enableCpuMemArena: false,
+                enableMemPattern: false
+            },
             onProgress: ({ progress, currentSegment, totalSegments }) => {
                 setBar(progress * 100);
                 setStatus(`②AIが分離を計算中… ${(progress * 100).toFixed(0)}%  （パート ${currentSegment}/${totalSegments}）`);
@@ -1583,7 +1591,6 @@
                 setStatus(`①分離モデルを準備中（初回だけ・以後は不要）… ${(loaded / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MB`);
             }
         };
-        if (execProviders) opts.sessionOptions = { executionProviders: execProviders };
         processor = new DemucsProcessor(opts);
         setStatus('①分離モデルを準備中（初回だけ約172MB・数分かかることがあります）…');
         setBarIndet();
@@ -1625,6 +1632,14 @@
             setStatus('🎵 音声ファイルを読み込んでいます…'); setBarIndet();
             const buf = await sepCtx.decodeAudioData(await file.arrayBuffer());
 
+            const durMin = buf.duration / 60;
+            if (durMin > 10) {
+                throw new Error(`曲が長すぎます（約${durMin.toFixed(1)}分）。メモリ不足でブラウザが落ちる可能性が高いため、まずは10分以内（できれば1〜3分）の曲でお試しください。`);
+            }
+            if (durMin > 5) {
+                setStatus(`⚠ 長め（約${durMin.toFixed(1)}分）の曲です。メモリに余裕が無い端末では落ちることがあります。そのまま続行します…`);
+            }
+
             let L = buf.getChannelData(0);
             let R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
             if (buf.sampleRate !== SAMPLE_RATE) {
@@ -1649,7 +1664,7 @@
                     backendEl.classList.remove('gpu'); backendEl.classList.add('cpu');
                     setStatus('WebGPUで問題が発生したため、CPU方式に切り替えて再試行します…（少し時間がかかります）');
                     setBarIndet();
-                    ort.env.wasm.numThreads = self.crossOriginIsolated ? (navigator.hardwareConcurrency || 4) : 1;
+                    ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
                     modelLoaded = false;
                     await loadProcessor(['wasm']);
                     tracks = await processor.separate(L, R);
