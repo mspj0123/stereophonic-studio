@@ -5,7 +5,7 @@
 import { CONSTANTS } from './constants.js';
 import { stft, istft, reflectPad } from './fft.js';
 
-const { SAMPLE_RATE, FFT_SIZE, HOP_SIZE, TRAINING_SAMPLES, MODEL_SPEC_BINS, MODEL_SPEC_FRAMES, SEGMENT_OVERLAP, TRACKS } = CONSTANTS;
+const { SAMPLE_RATE, FFT_SIZE, HOP_SIZE, TRAINING_SAMPLES, MODEL_SPEC_BINS, MODEL_SPEC_FRAMES, SEGMENT_OVERLAP, TRACKS, MODEL_CACHE_NAME } = CONSTANTS;
 
 /**
  * Convert model frequency output to complex spectrogram per track
@@ -146,6 +146,7 @@ export class DemucsProcessor {
     this.onProgress = options.onProgress || (() => {});
     this.onLog = options.onLog || (() => {});
     this.onDownloadProgress = options.onDownloadProgress || (() => {});
+    this.onCacheHit = options.onCacheHit || (() => {});
   }
 
   async loadModel(modelPathOrBuffer) {
@@ -159,36 +160,7 @@ export class DemucsProcessor {
     if (modelPathOrBuffer instanceof ArrayBuffer) {
       modelBuffer = modelPathOrBuffer;
     } else {
-      const response = await fetch(modelPathOrBuffer || this.modelPath);
-
-      // Check if we can track progress
-      const contentLength = response.headers.get('Content-Length');
-      if (contentLength && response.body) {
-        const totalSize = parseInt(contentLength, 10);
-        const reader = response.body.getReader();
-        const chunks = [];
-        let loadedSize = 0;
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-          loadedSize += value.length;
-          this.onDownloadProgress(loadedSize, totalSize);
-        }
-
-        // Combine chunks into single ArrayBuffer
-        const combined = new Uint8Array(loadedSize);
-        let offset = 0;
-        for (const chunk of chunks) {
-          combined.set(chunk, offset);
-          offset += chunk.length;
-        }
-        modelBuffer = combined.buffer;
-      } else {
-        // Fallback: no progress tracking
-        modelBuffer = await response.arrayBuffer();
-      }
+      modelBuffer = await this._fetchModel(modelPathOrBuffer || this.modelPath);
     }
 
     const defaultSessionOptions = {
@@ -205,20 +177,178 @@ export class DemucsProcessor {
     return this.session;
   }
 
-  async separate(leftChannel, rightChannel) {
+  /**
+   * 【追加 2026-08-17】モデル取得。Cache API に保存済みならダウンロードを省く。
+   * 初回だけ約172MBを取得し、以後は端末内のキャッシュから即座に読む。
+   */
+  async _fetchModel(url) {
+    let cache = null;
+    try {
+      // file:// や 非セキュアコンテキストでは caches が無い/使えない
+      if (typeof caches !== 'undefined') cache = await caches.open(MODEL_CACHE_NAME);
+    } catch (e) {
+      cache = null;
+    }
+
+    if (cache) {
+      try {
+        const hit = await cache.match(url);
+        if (hit) {
+          this.onLog('model', 'Model loaded from cache');
+          this.onCacheHit();
+          return await hit.arrayBuffer();
+        }
+      } catch (e) {
+        this.onLog('model', 'Cache lookup failed (ignored): ' + e.message);
+      }
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`分離モデルの取得に失敗しました (HTTP ${response.status})`);
+    }
+
+    // 保存用にクローンしてから本体をストリーミングで読む
+    // ※ 206 Partial Content は Cache API に保存できない仕様なので 200 のときだけ
+    let toCache = null;
+    if (cache && response.status === 200) {
+      try { toCache = response.clone(); } catch (e) { toCache = null; }
+    }
+
+    const buffer = await this._readWithProgress(response);
+
+    if (toCache) {
+      try {
+        await cache.put(url, toCache);
+        this.onLog('model', 'Model cached for next time');
+      } catch (e) {
+        // 容量不足などで保存できなくても処理自体は続行する
+        this.onLog('model', 'Model cache failed (ignored): ' + e.message);
+      }
+    }
+
+    return buffer;
+  }
+
+  /**
+   * 【改変 2026-08-17】受信バッファの二重確保をなくす。
+   * 以前は chunk を配列に貯めてから別配列へコピーしていたため、172MB のモデルで
+   * 一時的に約344MB を占有していた。Content-Length ぶんを先に確保して直接書き込む。
+   */
+  async _readWithProgress(response) {
+    const contentLength = response.headers.get('Content-Length');
+    const totalSize = contentLength ? parseInt(contentLength, 10) : 0;
+    if (!totalSize || !response.body) {
+      // 長さが分からない場合は進捗表示を諦めて一括取得
+      return await response.arrayBuffer();
+    }
+
+    const reader = response.body.getReader();
+    let combined = new Uint8Array(totalSize);
+    let offset = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (offset + value.length > combined.length) {
+        // Content-Length と実サイズが食い違う場合（圧縮転送など）の保険
+        const grown = new Uint8Array(Math.max(combined.length * 2, offset + value.length));
+        grown.set(combined.subarray(0, offset));
+        combined = grown;
+      }
+      combined.set(value, offset);
+      offset += value.length;
+      this.onDownloadProgress(offset, totalSize);
+    }
+
+    return offset === combined.length ? combined.buffer : combined.buffer.slice(0, offset);
+  }
+
+  /**
+   * ストリーミング分離。
+   *
+   * 【改変 2026-08-17 / メモリ対策】
+   * 以前は曲の全長ぶんの出力バッファ（4トラック×2ch＋重み配列＝4分の曲で約380MB）を
+   * 最初に確保していた。これが長い曲や低メモリ端末でブラウザごとクラッシュする主因だった。
+   *
+   * 重ね合わせの構造上、サンプル位置 p に寄与するのは
+   *   start <= p < start + TRAINING_SAMPLES
+   * を満たすセグメントだけなので、セグメント start の処理が終わった時点で
+   * 「p < start + stride」の範囲は値が確定している。
+   * そこで確定ぶんを onChunk() で順に吐き出し、バッファは TRAINING_SAMPLES 分だけを
+   * 使い回す（＝曲の長さに関係なくメモリ消費が一定）。
+   * 重ね合わせの計算自体は変えていないため、出力波形は従来と完全に同一。
+   *
+   * @param {Float32Array} leftChannel
+   * @param {Float32Array} rightChannel
+   * @param {(chunk:{offset:number,length:number,tracks:Object}) => void} [onChunk]
+   *        省略時は全部を集めて従来と同じ形（{drums,bass,other,vocals}）で返す互換モード。
+   */
+  async separate(leftChannel, rightChannel, onChunk) {
     if (!this.session) {
       throw new Error('Model not loaded. Call loadModel() first.');
+    }
+
+    // 互換モード: onChunk 無しなら全部集めて返す（メモリは従来同様に必要）
+    if (typeof onChunk !== 'function') {
+      const whole = {};
+      for (const name of TRACKS) {
+        whole[name] = {
+          left: new Float32Array(leftChannel.length),
+          right: new Float32Array(leftChannel.length)
+        };
+      }
+      await this.separate(leftChannel, rightChannel, (c) => {
+        for (const name of TRACKS) {
+          whole[name].left.set(c.tracks[name].left, c.offset);
+          whole[name].right.set(c.tracks[name].right, c.offset);
+        }
+      });
+      return whole;
     }
 
     const totalSamples = leftChannel.length;
     const stride = Math.floor(TRAINING_SAMPLES * (1 - SEGMENT_OVERLAP));
     const numSegments = Math.ceil((totalSamples - TRAINING_SAMPLES) / stride) + 1;
 
-    const outputs = TRACKS.map(() => ({
-      left: new Float32Array(totalSamples),
-      right: new Float32Array(totalSamples)
+    // 未確定領域だけを保持するスライディングバッファ（曲長に依存しない固定サイズ）
+    const BUF_LEN = TRAINING_SAMPLES;
+    const acc = TRACKS.map(() => ({
+      left: new Float32Array(BUF_LEN),
+      right: new Float32Array(BUF_LEN)
     }));
-    const weights = new Float32Array(totalSamples);
+    const accWeights = new Float32Array(BUF_LEN);
+    let bufStart = 0;   // acc[] の先頭が対応する、曲全体でのサンプル位置
+
+    // bufStart 〜 absEnd を確定ぶんとして吐き出し、残りを先頭へ詰め直す
+    const flushTo = (absEnd) => {
+      const len = absEnd - bufStart;
+      if (len <= 0) return;
+      const tracks = {};
+      for (let t = 0; t < TRACKS.length; t++) {
+        const l = new Float32Array(len);
+        const r = new Float32Array(len);
+        for (let i = 0; i < len; i++) {
+          const w = accWeights[i];
+          if (w > 0) {
+            l[i] = acc[t].left[i] / w;
+            r[i] = acc[t].right[i] / w;
+          }
+        }
+        tracks[TRACKS[t]] = { left: l, right: r };
+      }
+      onChunk({ offset: bufStart, length: len, tracks });
+      // 未確定ぶんを先頭へ寄せ、空いた末尾をゼロで埋める
+      for (let t = 0; t < TRACKS.length; t++) {
+        acc[t].left.copyWithin(0, len);
+        acc[t].left.fill(0, BUF_LEN - len);
+        acc[t].right.copyWithin(0, len);
+        acc[t].right.fill(0, BUF_LEN - len);
+      }
+      accWeights.copyWithin(0, len);
+      accWeights.fill(0, BUF_LEN - len);
+      bufStart = absEnd;
+    };
 
     let segmentIdx = 0;
 
@@ -304,8 +434,14 @@ export class DemucsProcessor {
         overlapWindow[i] = Math.min(fadeIn, fadeOut);
       }
 
+      // スライディングバッファ内での書き込み位置（flush 済みなので通常は 0）
+      const base = start - bufStart;
+      if (base < 0 || base + segmentLength > BUF_LEN) {
+        throw new Error(`内部エラー: 出力バッファ範囲外 (base=${base}, segmentLength=${segmentLength})`);
+      }
+
       for (let t = 0; t < numTracks; t++) {
-        for (let i = 0; i < segmentLength && start + i < totalSamples; i++) {
+        for (let i = 0; i < segmentLength; i++) {
           let leftVal, rightVal;
           if (combinedOutputs) {
             leftVal = combinedOutputs[t].left[i];
@@ -316,14 +452,27 @@ export class DemucsProcessor {
             leftVal = timeData[leftIdx];
             rightVal = timeData[rightIdx];
           }
-          outputs[t].left[start + i] += leftVal * overlapWindow[i];
-          outputs[t].right[start + i] += rightVal * overlapWindow[i];
+          acc[t].left[base + i] += leftVal * overlapWindow[i];
+          acc[t].right[base + i] += rightVal * overlapWindow[i];
         }
       }
 
-      for (let i = 0; i < segmentLength && start + i < totalSamples; i++) {
-        weights[start + i] += overlapWindow[i];
+      for (let i = 0; i < segmentLength; i++) {
+        accWeights[base + i] += overlapWindow[i];
       }
+
+      // 推論結果のテンソルを明示的に解放（特に WebGPU の GPU バッファ）。
+      // timeData / freqData を使い終えたこの位置で行う。
+      timeData = null; freqData = null; combinedOutputs = null;
+      for (const name of this.session.outputNames) {
+        const t2 = inferResults[name];
+        if (t2 && typeof t2.dispose === 'function') { try { t2.dispose(); } catch (e) { /* 解放失敗は無視 */ } }
+      }
+      if (typeof waveformTensor.dispose === 'function') { try { waveformTensor.dispose(); } catch (e) {} }
+      if (typeof magSpecTensor.dispose === 'function') { try { magSpecTensor.dispose(); } catch (e) {} }
+
+      // 確定した部分を吐き出してメモリを解放する
+      flushTo(Math.min(start + stride, totalSamples));
 
       segmentIdx++;
       this.onProgress({
@@ -333,20 +482,9 @@ export class DemucsProcessor {
       });
     }
 
-    for (let t = 0; t < TRACKS.length; t++) {
-      for (let i = 0; i < totalSamples; i++) {
-        if (weights[i] > 0) {
-          outputs[t].left[i] /= weights[i];
-          outputs[t].right[i] /= weights[i];
-        }
-      }
-    }
+    // 通常は最終セグメントで totalSamples まで flush 済みだが、念のため残りを出す
+    flushTo(totalSamples);
 
-    return {
-      drums: outputs[0],
-      bass: outputs[1],
-      other: outputs[2],
-      vocals: outputs[3]
-    };
+    return { totalSamples };
   }
 }

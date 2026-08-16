@@ -39,7 +39,8 @@ async function ensureProcessor(useGpu, threads) {
         },
         onProgress: ({ progress, currentSegment, totalSegments }) =>
             post({ type: 'progress', progress, currentSegment, totalSegments }),
-        onDownloadProgress: (loaded, total) => post({ type: 'download', loaded, total })
+        onDownloadProgress: (loaded, total) => post({ type: 'download', loaded, total }),
+        onCacheHit: () => post({ type: 'phase', phase: 'cachehit' })
     });
     post({ type: 'phase', phase: 'loadmodel' });
     await processor.loadModel(CONSTANTS.DEFAULT_MODEL_URL);
@@ -61,18 +62,25 @@ self.onmessage = async (e) => {
 
         await ensureProcessor(!!useGpu, threads || 1);
 
-        post({ type: 'phase', phase: 'separate' });
-        const tracks = await processor.separate(left, right);
+        // 【改変 2026-08-17】曲全体を一括で返すのをやめ、確定した部分から順に送る。
+        // 先に全長を知らせて、メイン側で出力先の AudioBuffer を作ってもらう。
+        post({ type: 'meta', totalSamples: left.length, sampleRate: SAMPLE_RATE, tracks: CONSTANTS.TRACKS });
 
-        const out = {};
-        const transfers = [];
-        for (const name of ['vocals', 'drums', 'bass', 'other']) {
-            const tr = tracks[name];
-            if (!tr) continue;
-            out[name] = { left: tr.left, right: tr.right };
-            transfers.push(tr.left.buffer, tr.right.buffer);
-        }
-        post({ type: 'done', tracks: out }, transfers);
+        post({ type: 'phase', phase: 'separate' });
+        await processor.separate(left, right, ({ offset, length, tracks }) => {
+            const out = {};
+            const transfers = [];
+            for (const name of CONSTANTS.TRACKS) {
+                const tr = tracks[name];
+                if (!tr) continue;
+                out[name] = { left: tr.left, right: tr.right };
+                transfers.push(tr.left.buffer, tr.right.buffer);
+            }
+            // 転送（transfer）で渡すのでコピーは発生せず、ワーカー側からは即座に消える
+            post({ type: 'chunk', offset, length, tracks: out }, transfers);
+        });
+
+        post({ type: 'done' });
     } catch (err) {
         // WebGPUを使っていて失敗したら、呼び出し側にフォールバック指示を返す
         post({ type: 'error', message: (err && err.message) ? err.message : String(err), usedGpu: !!msg.useGpu });
