@@ -12,5 +12,9 @@ export const CONSTANTS = {
   TRACKS: ['drums', 'bass', 'other', 'vocals'],
 
   // Default model URL (Hugging Face Hub)
-  DEFAULT_MODEL_URL: 'https://huggingface.co/timcsy/demucs-web-onnx/resolve/main/htdemucs_embedded.onnx'
+  DEFAULT_MODEL_URL: 'https://huggingface.co/timcsy/demucs-web-onnx/resolve/main/htdemucs_embedded.onnx',
+
+  // Cache API に保存するときの名前（2回目以降のダウンロードを省くため）
+  // モデルを差し替えたら末尾の版数を上げて古いキャッシュを使わせないこと
+  MODEL_CACHE_NAME: 'demucs-model-v1'
 };
