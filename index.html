@@ -1,104 +1,2354 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Stereophonic Studio — 音源分離＆立体音響プレイヤー</title>
-<!-- 静的ホスト(GitHub Pages等)でクロスオリジン分離を有効化（SharedArrayBuffer用・MIT） -->
-<script src="coi-serviceworker.js"></script>
-<style>
-    * { box-sizing: border-box; }
-    body {
-        font-family: 'Segoe UI', sans-serif;
-        background: linear-gradient(135deg, #0a0a14 0%, #14142b 100%);
-        color: #fff; margin: 0; padding: 0; min-height: 100vh;
-    }
-    .topbar {
-        display: flex; align-items: center; gap: 12px; padding: 18px 24px;
-        border-bottom: 1px solid rgba(0,242,255,0.15); background: rgba(10,10,24,0.6);
-    }
-    .logo { font-size: 18px; font-weight: 300; letter-spacing: 3px; color: #e0e0ff; }
-    .logo span { color: #00f2ff; font-weight: 600; }
-    .container { max-width: 820px; margin: 0 auto; padding: 24px; }
-    .card {
-        background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 14px; padding: 22px; margin-bottom: 18px;
-    }
-    .hero { text-align: center; border-color: rgba(0,242,255,0.25); }
-    .hero h2 { font-size: 20px; }
-    h2 { font-size: 15px; font-weight: 600; color: #e0e0ff; margin: 0 0 6px; letter-spacing: 1px; }
-    .sub { font-size: 12px; color: #8888aa; margin: 0 0 16px; line-height: 1.7; }
-    .song {
-        display: flex; align-items: center; gap: 14px;
-        background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
-    }
-    .song .meta { flex: 1; min-width: 0; }
-    .song .title { font-size: 14px; color: #fff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .song .info { font-size: 11px; color: #8888aa; margin-top: 3px; }
-    .btn {
-        border: none; padding: 11px 22px; border-radius: 8px; cursor: pointer;
-        font-weight: 600; font-size: 14px; text-decoration: none; display: inline-block;
-        background: linear-gradient(135deg, #00f2ff, #c47aff); color: #0a0a14;
-    }
-    .btn:hover { filter: brightness(1.1); }
-    .btn.play { font-size: 13px; padding: 9px 18px; background: linear-gradient(135deg, #00c853, #00a040); color: #fff; }
-    .empty { text-align: center; color: #6666aa; font-size: 13px; padding: 24px; line-height: 1.8; }
-    code { background: rgba(0,0,0,0.5); padding: 2px 6px; border-radius: 4px; color: #ffcb47; font-size: 12px; }
-    .note { font-size: 11px; color: #7777a0; line-height: 1.7; margin-top: 10px; }
-</style>
+    <meta charset="UTF-8">
+    <title>Stereophonic Sound - Multi Stem</title>
+    <!-- クロスオリジン分離を静的ホスト(GitHub Pages)で有効化（SharedArrayBuffer用・MIT） -->
+    <script src="coi-serviceworker.js"></script>
+    <style>
+        /* --- ブラウザ内音源分離パネル --- */
+        .sep-note { font-size:12px; color:#9a9ac8; line-height:1.7; margin:4px 0 12px; }
+        .sep-badge { display:inline-block; font-size:11px; padding:3px 10px; border-radius:12px; background:#1e2246; color:#7fb8ff; margin-bottom:10px; }
+        .sep-badge.gpu { background:rgba(0,242,255,.15); color:#00f2ff; }
+        .sep-badge.cpu { background:rgba(255,203,71,.15); color:#ffcb47; }
+        .sep-fname { font-size:12px; color:#00f2ff; display:inline-flex; align-items:center; }
+        .sep-gpu { display:block; font-size:11px; color:#9a9ac8; margin:0 0 12px; cursor:pointer; line-height:1.6; }
+        .sep-gpu input { vertical-align:middle; margin-right:6px; }
+        .sep-gpu.disabled { opacity:.5; }
+        .sep-bar { height:8px; background:#161a34; border-radius:4px; overflow:hidden; margin-top:12px; }
+        .sep-bar-fill { height:100%; width:0%; background:linear-gradient(90deg,#00f2ff,#c47aff); transition:width .3s; }
+        .sep-status { font-size:13px; color:#e0e0ff; line-height:1.6; white-space:pre-line; }
+        .sep-working { display:flex; gap:14px; align-items:center; margin-top:14px; padding:14px;
+            background:rgba(0,242,255,.06); border:1px solid rgba(0,242,255,.28); border-radius:10px; }
+        .sep-working > .sep-main { flex:1; min-width:0; }
+        .sep-spinner { width:30px; height:30px; flex:none; border:3px solid rgba(0,242,255,.2);
+            border-top-color:#00f2ff; border-radius:50%; animation:sepspin .9s linear infinite; }
+        @keyframes sepspin { to { transform:rotate(360deg); } }
+        .sep-elapsed { font-size:11px; color:#7fb8ff; margin-top:6px; font-variant-numeric:tabular-nums; }
+        .sep-bar-fill.indet { width:40% !important; border-radius:4px;
+            animation:sepindet 1.1s ease-in-out infinite; }
+        @keyframes sepindet { 0%{margin-left:-42%;} 100%{margin-left:100%;} }
+        .sep-warn { font-size:12px; color:#ffcb47; margin-top:10px; line-height:1.6;
+            background:rgba(255,203,71,.08); border:1px solid rgba(255,203,71,.25);
+            border-radius:8px; padding:9px 12px; }
+        /* 分離結果の保存パネル（2026-09-06 追加） */
+        .sep-save { margin-top:14px; padding:12px 14px; border-radius:8px;
+            background:rgba(0,200,83,.07); border:1px solid rgba(0,200,83,.3); }
+        .sep-save-title { font-size:14px; font-weight:bold; color:#5ce68a; margin-bottom:6px; }
+        .sep-save .sep-note { margin:0 0 10px; }
+        .sep-save-btns { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+        .sep-save-status { font-size:12px; color:#9a9ac8; margin-top:9px; min-height:1.4em; line-height:1.6; }
+        .btn.save { background:linear-gradient(135deg,#1f8f52,#166b3d); }
+        .btn.save:hover:not(:disabled) { background:linear-gradient(135deg,#25a862,#1b7d47); }
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #0a0a14 0%, #14142b 100%);
+            color: #fff;
+            margin: 0;
+            padding: 24px;
+            min-height: 100vh;
+        }
+        .container { max-width: 820px; margin: 0 auto; }
+        h1 {
+            position: relative;
+            text-align: center;
+            font-size: 24px;
+            font-weight: 300;
+            letter-spacing: 3px;
+            margin: 0 0 24px;
+            color: #e0e0ff;
+        }
+        h1 span { color: #00f2ff; font-weight: 600; }
+        h1 small { display: block; font-size: 11px; color: #8888aa; letter-spacing: 2px; margin-top: 4px; }
+
+        /* ヘッダーボタン */
+        .header-btns {
+            position: absolute;
+            right: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            gap: 8px;
+        }
+        .icon-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(0, 242, 255, 0.4);
+            color: #00f2ff;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .icon-btn:hover { background: rgba(0, 242, 255, 0.15); transform: scale(1.05); }
+        .icon-btn.alg { border-color: rgba(196, 122, 255, 0.5); color: #c47aff; }
+        .icon-btn.alg:hover { background: rgba(196, 122, 255, 0.15); }
+
+        /* モーダル */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            animation: fadeIn 0.2s ease;
+        }
+        .modal-overlay.show { display: flex; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .modal {
+            background: linear-gradient(135deg, #14142b 0%, #1a1a3a 100%);
+            border: 1px solid rgba(0, 242, 255, 0.3);
+            border-radius: 14px;
+            max-width: 600px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            padding: 28px;
+            color: #e0e0ff;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+            animation: slideUp 0.25s ease;
+        }
+        .modal.alg { border-color: rgba(196, 122, 255, 0.4); }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .modal h2 { margin: 0 0 8px; font-size: 18px; font-weight: 600; color: #00f2ff; letter-spacing: 1px; }
+        .modal.alg h2 { color: #c47aff; }
+        .modal h3 { margin: 18px 0 8px; font-size: 14px; font-weight: 600; color: #e0e0ff; }
+        .modal .lead { font-size: 13px; color: #aaaacc; margin: 0 0 18px; line-height: 1.6; }
+        .modal .step {
+            background: rgba(0, 0, 0, 0.3);
+            border-left: 3px solid #00f2ff;
+            border-radius: 6px;
+            padding: 12px 14px;
+            margin-bottom: 10px;
+            font-size: 13px;
+            line-height: 1.7;
+        }
+        .modal.alg .step { border-left-color: #c47aff; }
+        .modal .step b { color: #fff; }
+        .modal .step .quote {
+            display: block;
+            font-style: italic;
+            color: #00f2ff;
+            border-left: 2px solid rgba(0, 242, 255, 0.4);
+            padding-left: 10px;
+            margin: 6px 0 8px;
+            font-size: 12px;
+        }
+        .modal.alg .step .quote { color: #c47aff; border-left-color: rgba(196, 122, 255, 0.4); }
+        .modal .step .term { display: block; font-size: 11px; color: #8888aa; margin-top: 6px; }
+        .modal .path {
+            font-family: 'Consolas', monospace;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 2px 8px;
+            border-radius: 4px;
+            color: #ffcb47;
+            font-size: 12px;
+        }
+        .modal pre.flow {
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 6px;
+            padding: 14px;
+            font-family: 'Consolas', monospace;
+            font-size: 11px;
+            line-height: 1.5;
+            color: #00f2ff;
+            margin: 10px 0;
+            overflow-x: auto;
+        }
+        .modal .param-list {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
+            padding: 6px 14px;
+            margin: 10px 0;
+        }
+        .modal .param-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            font-size: 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .modal .param-row:last-child { border-bottom: none; }
+        .modal .param-row span { color: #aaaacc; }
+        .modal .param-row b { color: #c47aff; font-family: 'Consolas', monospace; font-weight: 500; }
+        .modal .tips {
+            background: rgba(255, 203, 71, 0.08);
+            border-left: 3px solid #ffcb47;
+            border-radius: 6px;
+            padding: 12px 14px;
+            font-size: 12px;
+            line-height: 1.7;
+            margin-top: 14px;
+        }
+        .modal .tips b { color: #ffcb47; }
+        .modal .note { font-size: 11px; color: #8888aa; margin-top: 14px; line-height: 1.6; }
+        .modal-close {
+            display: block;
+            width: 100%;
+            margin-top: 18px;
+            background: linear-gradient(135deg, #00f2ff, #0090ff);
+            color: #001020;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            font-weight: 700;
+            cursor: pointer;
+            letter-spacing: 1px;
+        }
+        .modal.alg .modal-close { background: linear-gradient(135deg, #c47aff, #8a3ff0); color: #fff; }
+        .modal-close:hover { filter: brightness(1.1); }
+
+        /* カード共通 */
+        .card {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            padding: 20px;
+            margin-bottom: 18px;
+        }
+        .card-title { font-size: 11px; color: #8888aa; letter-spacing: 2px; margin-bottom: 12px; text-transform: uppercase; }
+
+        /* プレイヤー */
+        .player-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .btn {
+            border: none;
+            padding: 10px 18px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 13px;
+            transition: all 0.2s;
+            background: #2a2a3e;
+            color: #fff;
+        }
+        .btn:hover:not(:disabled) { background: #3a3a52; transform: translateY(-1px); }
+        .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+        .btn.primary { background: linear-gradient(135deg, #00c853, #00a040); }
+        .btn.primary:hover:not(:disabled) { background: linear-gradient(135deg, #00e060, #00b848); }
+        .btn.warn { background: linear-gradient(135deg, #ffab00, #e09000); color: #000; }
+        .btn.small { padding: 5px 10px; font-size: 11px; }
+
+        /* 波形 + プレイヘッド */
+        .wave-wrap { position: relative; margin-top: 12px; user-select: none; }
+        canvas#waveCanvas {
+            width: 100%;
+            height: 60px;
+            background: #000;
+            border-radius: 6px;
+            cursor: pointer;
+            display: block;
+        }
+        #playhead {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 2px;
+            height: 100%;
+            background: #ff3366;
+            box-shadow: 0 0 8px #ff3366, 0 0 2px #fff;
+            pointer-events: none;
+            transform: translateX(-1px);
+        }
+        #playhead::before {
+            content: '';
+            position: absolute;
+            top: -4px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 10px;
+            height: 10px;
+            background: #ff3366;
+            border-radius: 50%;
+            box-shadow: 0 0 8px #ff3366;
+        }
+        .time-row {
+            display: flex;
+            justify-content: space-between;
+            font-family: 'Consolas', monospace;
+            font-size: 11px;
+            color: #8888aa;
+            margin-top: 6px;
+        }
+        .vol-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+        .vol-row label { font-size: 11px; color: #8888aa; letter-spacing: 1px; min-width: 60px; }
+        .vol-row input[type=range] { flex: 1; accent-color: #00f2ff; }
+
+        /* ステムリスト */
+        .stems-empty {
+            text-align: center;
+            padding: 30px 10px;
+            color: #6666aa;
+            font-size: 13px;
+            border: 1px dashed #2a2a3e;
+            border-radius: 8px;
+        }
+        .stem-row {
+            display: grid;
+            grid-template-columns: 14px 1fr auto auto auto auto;
+            gap: 10px;
+            align-items: center;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: #0a0a18;
+            border: 1px solid #2a2a3e;
+            margin-bottom: 6px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .stem-row:hover { border-color: #4a4a72; }
+        .stem-row.selected {
+            border-color: #00f2ff;
+            background: rgba(0, 242, 255, 0.06);
+            box-shadow: 0 0 0 1px rgba(0, 242, 255, 0.4);
+        }
+        .stem-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            box-shadow: 0 0 6px currentColor;
+        }
+        .stem-name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .stem-vol {
+            width: 100px;
+            accent-color: #00f2ff;
+        }
+        .stem-btn {
+            width: 28px;
+            height: 26px;
+            border: 1px solid #3a3a52;
+            background: transparent;
+            color: #aaaacc;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .stem-btn:hover { border-color: #00f2ff; color: #fff; }
+        .stem-btn.active.M { background: #ffab00; border-color: #ffab00; color: #000; }
+        .stem-btn.active.S { background: #00f2ff; border-color: #00f2ff; color: #000; }
+        .stem-btn.X:hover { border-color: #ff3366; color: #ff3366; }
+
+        /* 操作凡例 */
+        .legend {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+            font-size: 11px;
+            color: #aaaacc;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 10px;
+        }
+        .legend .lg-item { display: inline-flex; align-items: center; gap: 6px; }
+        .legend b {
+            display: inline-block;
+            min-width: 18px;
+            text-align: center;
+            border: 1px solid #3a3a52;
+            border-radius: 4px;
+            padding: 1px 4px;
+            font-size: 10px;
+            font-weight: 700;
+        }
+        .legend b.lg-m { color: #ffab00; border-color: #ffab00; }
+        .legend b.lg-s { color: #00f2ff; border-color: #00f2ff; }
+        .legend b.lg-x { color: #ff6688; border-color: #ff6688; }
+
+        /* 補足ノート */
+        .info-note {
+            font-size: 11px;
+            color: #8888aa;
+            background: rgba(196, 122, 255, 0.08);
+            border-left: 2px solid rgba(196, 122, 255, 0.5);
+            border-radius: 4px;
+            padding: 8px 12px;
+            margin-bottom: 12px;
+            line-height: 1.6;
+        }
+
+        /* 立体音響トグル */
+        .toggle-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 22px 24px;
+        }
+        .toggle-label { font-size: 16px; font-weight: 600; letter-spacing: 1px; }
+        .toggle-label small { display: block; font-size: 11px; color: #8888aa; font-weight: 400; margin-top: 4px; }
+        .toggle-switch {
+            position: relative;
+            width: 90px;
+            height: 40px;
+            background: #1a1a2e;
+            border-radius: 20px;
+            cursor: pointer;
+            border: 1px solid #2a2a3e;
+            transition: background 0.3s;
+            user-select: none;
+            flex-shrink: 0;
+        }
+        .toggle-switch.on { background: linear-gradient(135deg, #00f2ff, #0090ff); border-color: #00f2ff; }
+        .toggle-knob {
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 32px;
+            height: 32px;
+            background: #fff;
+            border-radius: 50%;
+            transition: left 0.3s;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+        }
+        .toggle-switch.on .toggle-knob { left: 53px; box-shadow: 0 0 14px #00f2ff; }
+
+        /* 位置指定 */
+        .position-card.disabled { opacity: 0.4; pointer-events: none; }
+        .position-grid {
+            display: grid;
+            grid-template-columns: 1fr 80px;
+            gap: 18px;
+            align-items: center;
+        }
+        .pad-wrap { text-align: center; }
+        .pad-title { font-size: 11px; color: #8888aa; letter-spacing: 1px; margin-bottom: 8px; }
+        .pad-title b { color: #fff; }
+        #pad {
+            width: 360px;
+            height: 360px;
+            margin: 0 auto;
+            background:
+                radial-gradient(circle, rgba(0, 242, 255, 0.08) 0%, transparent 70%),
+                #0a0a18;
+            border: 2px solid #2a2a3e;
+            border-radius: 50%;
+            position: relative;
+            cursor: crosshair;
+            touch-action: none;
+        }
+        .pad-axis { position: absolute; background: rgba(255, 255, 255, 0.06); }
+        .pad-axis.h { left: 0; right: 0; top: 50%; height: 1px; }
+        .pad-axis.v { top: 0; bottom: 0; left: 50%; width: 1px; }
+        .pad-ring {
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 60%; height: 60%;
+            transform: translate(-50%, -50%);
+            border: 1px dashed rgba(255, 255, 255, 0.08);
+            border-radius: 50%;
+            pointer-events: none;
+        }
+        .pad-label { position: absolute; font-size: 10px; color: #6666aa; letter-spacing: 1px; pointer-events: none; }
+        .pad-label.front { top: 8px; left: 50%; transform: translateX(-50%); }
+        .pad-label.back  { bottom: 8px; left: 50%; transform: translateX(-50%); }
+        .pad-label.left  { left: 8px; top: 50%; transform: translateY(-50%); }
+        .pad-label.right { right: 8px; top: 50%; transform: translateY(-50%); }
+        #listener {
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 14px; height: 14px;
+            background: #ff3366;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 12px #ff3366;
+            pointer-events: none;
+            z-index: 5;
+        }
+        .stem-dot {
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 10px currentColor;
+            background: currentColor;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            transition: width 0.15s, height 0.15s;
+            cursor: grab;
+        }
+        .stem-dot.selected {
+            width: 26px;
+            height: 26px;
+            border: 2px solid #fff;
+            box-shadow: 0 0 18px currentColor, 0 0 0 3px rgba(255, 255, 255, 0.15);
+            z-index: 10;
+        }
+        .stem-dot-label {
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            transform: translate(-50%, 4px);
+            font-size: 9px;
+            color: rgba(255, 255, 255, 0.6);
+            white-space: nowrap;
+            pointer-events: none;
+        }
+
+        /* 上下スライダー */
+        .height-wrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 360px;
+        }
+        .height-title { font-size: 11px; color: #8888aa; letter-spacing: 1px; margin-bottom: 8px; }
+        .height-label { font-size: 10px; color: #6666aa; letter-spacing: 1px; }
+        #heightSlider {
+            -webkit-appearance: slider-vertical;
+            writing-mode: vertical-lr;
+            direction: rtl;
+            width: 6px;
+            flex: 1;
+            margin: 8px 0;
+            accent-color: #00f2ff;
+        }
+
+        /* ステータス */
+        .status {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-top: 18px;
+        }
+        .status-item {
+            background: #0a0a18;
+            border: 1px solid #2a2a3e;
+            border-radius: 6px;
+            padding: 10px;
+            text-align: center;
+        }
+        .status-item .label { font-size: 10px; color: #8888aa; letter-spacing: 1px; }
+        .status-item .value { font-family: 'Consolas', monospace; font-size: 18px; color: #00f2ff; margin-top: 4px; }
+
+        .reset-btn {
+            display: block;
+            margin: 14px auto 0;
+            background: transparent;
+            border: 1px solid #3a3a52;
+            color: #8888aa;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .reset-btn:hover { color: #fff; border-color: #00f2ff; }
+    </style>
 </head>
 <body>
-    <div class="topbar">
-        <div class="logo">STEREOPHONIC <span>STUDIO</span></div>
-    </div>
     <div class="container">
-        <!-- 分離への導線 -->
-        <div class="card hero">
-            <h2>🎤 音源を分離して立体音響で聴く</h2>
-            <p class="sub">曲をアップロードせず、<b>あなたのブラウザの中だけ</b>で AI（Demucs）が
-                ボーカル・ドラム・ベース等に分離します。音源は外部に送信されません。<br>
-                分離した各パートを 3D 空間に配置して再生できます。</p>
-            <a class="btn" href="player.html">分離してプレイヤーを開く →</a>
-            <p class="note">※ PCのChrome / Edge 推奨。分離は<b>CPUで安定動作</b>（GPU高速化は任意）。初回のみ分離モデル（約172MB）を読み込みます。
-                曲の長さと端末性能により分離に数十秒〜数分かかります。メモリを多く使うため、他のタブを閉じ、まずは短い曲でお試しください。</p>
+        <h1>
+            STEREOPHONIC <span>SOUND</span>
+            <small>MULTI STEM</small>
+            <div class="header-btns">
+                <button class="icon-btn alg" id="algBtn" title="アルゴリズム解説">i</button>
+                <button class="icon-btn" id="helpBtn" title="効果が薄いとき">?</button>
+            </div>
+        </h1>
+
+        <!-- 作業フォルダ（分離した音源の保存先）2026-09-06 追加 -->
+        <div class="card" id="workdirCard">
+            <div class="card-title">📂 作業フォルダ（分離した音源の保存先）</div>
+            <p class="sep-note" id="wdNote">最初に<b>保存先のフォルダ</b>を選んでおくと、分離が終わるたびに<b>曲ごとのフォルダが作られ、そこへ自動で保存</b>されます（元の曲もコピーされます）。次回このページを開くと、そのフォルダの中の曲が上の「曲:」に一覧表示され、<b>分離し直さずにすぐ再生</b>できます。<br>※フォルダの中身が外部に送られることはありません。すべてお使いのPCの中だけで完結します。</p>
+            <div class="player-row">
+                <button class="btn" id="wdPickBtn">📂 作業フォルダを選ぶ</button>
+                <button class="btn small" id="wdRescanBtn" style="display:none">🔄 一覧を更新</button>
+                <button class="btn small" id="wdClearBtn" style="display:none">解除</button>
+                <span class="sep-fname" id="wdName"></span>
+            </div>
+            <div class="sep-save-status" id="wdStatus"></div>
         </div>
 
-        <!-- 共有ライブラリ -->
+        <!-- 音源分離（ブラウザ内AI） -->
+        <div class="card" id="sepCard">
+            <div class="card-title">🎤 音源を分離（ブラウザ内AI・アップロード不要）</div>
+            <p class="sep-note">曲を選ぶと、<b>この端末の中だけ</b>で Demucs AI が vocals / drums / bass / other に分離します。音源が外部サーバーに送られることはありません。分離後は自動で下のプレイヤーに追加され、そのまま立体音響で再生できます。<br>※初回は分離モデル（約172MB）のダウンロードがあります。<b>既定はCPUで安定動作</b>します（上のチェックでGPU高速化も任意で試せます）。Chrome / Edge 推奨。<br>※<b>分離には時間がかかります</b>（初回はモデルDL＋計算で数分になることも）。進捗バーと経過時間が表示されます。<b>終わるまでこのタブを閉じたり「戻る」しないでください。</b><br>※初回のモデル読み込みのあとは<b>端末内にキャッシュ</b>されるため、2回目からはダウンロード無しですぐ始まります。<br>※分離の計算は曲の長さに関係なく<b>一定のメモリ</b>で動きます。ただし再生用の音声を丸ごと保持するため、長い曲ほどメモリを使います（対応は10分まで／メモリの少ない端末は5分まで）。「アプリが終了しました」等で落ちる場合は、<b>PCのChrome/Edge</b>で、<b>他のタブ・アプリを閉じてから</b>、<b>短い曲</b>でお試しください。</p>
+            <div id="sepBackend" class="sep-badge">バックエンド検出中…</div>
+            <label class="sep-gpu" id="sepGpuLabel"><input type="checkbox" id="sepUseGpu"> ⚡ GPUで高速化を試す（対応環境のみ）。<b>ブラウザが落ちる・不安定な場合はチェックを外したまま</b>にしてください（既定はオフ＝安定重視のCPU処理）。</label>
+            <div class="player-row">
+                <button class="btn" id="sepPickBtn">＋ 分離する曲を選ぶ</button>
+                <input type="file" id="sepFileInput" accept="audio/*" style="display:none">
+                <span id="sepFileName" class="sep-fname"></span>
+            </div>
+            <div id="sepProgressWrap" style="display:none">
+                <div class="sep-working">
+                    <div class="sep-spinner" id="sepSpinner"></div>
+                    <div class="sep-main">
+                        <div id="sepStatus" class="sep-status">準備中…</div>
+                        <div class="sep-bar"><div id="sepBar" class="sep-bar-fill"></div></div>
+                        <div class="sep-elapsed" id="sepElapsed">経過時間 0:00</div>
+                    </div>
+                </div>
+                <div class="sep-warn" id="sepWarn">⚠ 分離が終わるまで、このタブを<b>閉じたり・リロード・「戻る」</b>をしないでください（分離が中断され、最初からやり直しになります）。</div>
+            </div>
+            <!-- 分離結果の保存（2026-09-06 追加） -->
+            <div class="sep-save" id="sepSave" style="display:none">
+                <div class="sep-save-title" id="sepSaveTitle">💾 分離した音源の保存</div>
+                <p class="sep-note" id="sepSaveNote"></p>
+                <div class="sep-save-btns" id="sepSaveBtns"></div>
+                <div class="sep-save-status" id="sepSaveStatus"></div>
+            </div>
+        </div>
+
+        <!-- プレイヤー -->
         <div class="card">
-            <h2>共有ライブラリ</h2>
-            <p class="sub">みんなで聴ける分離済みの曲です。「▶ 再生」で立体音響プレイヤーが開きます。</p>
-            <div id="list"><div class="empty">読み込み中…</div></div>
+            <div class="player-row">
+                <button class="btn" id="addBtn">＋ 音源ファイルを追加</button>
+                <input type="file" id="fileInput" accept="audio/*" multiple style="display:none">
+                <button id="playBtn" class="btn primary" disabled>▶ 再生</button>
+                <button id="pauseBtn" class="btn warn" disabled>❚❚ 停止</button>
+            </div>
+            <div class="wave-wrap">
+                <canvas id="waveCanvas"></canvas>
+                <div id="playhead" style="display:none"></div>
+            </div>
+            <div class="time-row">
+                <span id="timeCurrent">0:00</span>
+                <span id="timeTotal">0:00</span>
+            </div>
+            <div class="vol-row">
+                <label>MASTER</label>
+                <input type="range" id="volSlider" min="0" max="1" value="0.7" step="0.01">
+            </div>
+        </div>
+
+        <!-- 音源リスト -->
+        <div class="card">
+            <div class="card-title">音源リスト</div>
+            <div class="legend">
+                <span class="lg-item"><b class="lg-m">M</b> 消音 (ミュート)</span>
+                <span class="lg-item"><b class="lg-s">S</b> この音だけ再生 (ソロ)</span>
+                <span class="lg-item"><b class="lg-x">×</b> 一覧から削除</span>
+            </div>
+            <div id="stemsList"></div>
+        </div>
+
+        <!-- 立体音響 -->
+        <div class="card toggle-card">
+            <div class="toggle-label">
+                立体音響
+                <small>ON: 各ステムを 3D 空間に配置 / OFF: そのままミックス</small>
+            </div>
+            <div id="toggle3D" class="toggle-switch">
+                <div class="toggle-knob"></div>
+            </div>
+        </div>
+
+        <!-- 位置指定 -->
+        <div id="positionCard" class="card position-card disabled">
+            <div class="info-note">
+                ※ 各音源の<b>初期位置はファイル名から自動推定</b>しています (vocals→前 / drums→後ろ等)。
+                音源データそのものに 3D 位置情報は含まれていません。位置を変えたい場合は下のパッドでドラッグしてください。
+            </div>
+            <div class="position-grid">
+                <div class="pad-wrap">
+                    <div class="pad-title">前後左右 ─ 選択中の音源: <b id="selectedName">-</b></div>
+                    <div id="pad">
+                        <div class="pad-axis h"></div>
+                        <div class="pad-axis v"></div>
+                        <div class="pad-ring"></div>
+                        <div class="pad-label front">FRONT</div>
+                        <div class="pad-label back">BACK</div>
+                        <div class="pad-label left">L</div>
+                        <div class="pad-label right">R</div>
+                        <div id="listener"></div>
+                    </div>
+                </div>
+                <div class="height-wrap">
+                    <div class="height-title">上下</div>
+                    <div class="height-label">UP</div>
+                    <input type="range" id="heightSlider" orient="vertical" min="-5" max="5" step="0.1" value="0">
+                    <div class="height-label">DOWN</div>
+                </div>
+            </div>
+
+            <div class="status">
+                <div class="status-item"><div class="label">X (左右)</div><div class="value" id="xVal">0.0</div></div>
+                <div class="status-item"><div class="label">Y (上下)</div><div class="value" id="yVal">0.0</div></div>
+                <div class="status-item"><div class="label">Z (前後)</div><div class="value" id="zVal">0.0</div></div>
+            </div>
+
+            <button class="reset-btn" id="resetBtn">選択中の音源を中央にリセット</button>
+        </div>
+    </div>
+
+    <!-- ヘルプ -->
+    <div id="helpModal" class="modal-overlay">
+        <div class="modal">
+            <h2>立体音響の効果が薄いと感じたら</h2>
+            <p class="lead">Windows の音声処理がプログラム側のパンニングを上書きしてしまうことがあります。以下の設定を確認してください。</p>
+            <div class="step">
+                <b>① サウンド設定を開く</b><br>
+                <span class="path">設定 &gt; システム &gt; サウンド</span> → 出力デバイスの「&gt;」でプロパティ画面へ。
+            </div>
+            <div class="step">
+                <b>② 「オーディオの強化」を <span style="color:#ff6688">オフ</span></b><br>
+                <span style="color:#8888aa; font-size:11px;">※ 拡張効果がアプリ側の音量制御を上書きするのを防ぎます。</span>
+            </div>
+            <div class="step">
+                <b>③ 「立体音響」(Windows Sonic 等) を <span style="color:#ff6688">オフ</span></b><br>
+                <span style="color:#8888aa; font-size:11px;">※ OS 側 3D と本アプリの HRTF が二重にかかると効果が打ち消されます。</span>
+            </div>
+            <div class="step">
+                <b>④ 「モノラルオーディオ」を <span style="color:#ff6688">オフ</span></b>
+            </div>
+            <p class="note">ヘッドホン／イヤホンでの試聴を推奨します。</p>
+            <button class="modal-close" data-close="helpModal">閉じる</button>
+        </div>
+    </div>
+
+    <!-- アルゴリズム -->
+    <div id="algModal" class="modal-overlay">
+        <div class="modal alg">
+            <h2>マルチステム立体音響アルゴリズム</h2>
+            <p class="lead">
+                AI で分離した複数ステム (ボーカル / ドラム / ベース等) を、それぞれ独立した位置に配置できます。
+                4 つの専門分野の知見を組み合わせて自然な立体感を作っています。
+            </p>
+
+            <h3>処理の全体像</h3>
+            <pre class="flow">[ステム 1] ┐
+[ステム 2] ┼→ ① HRTF (各々の方向感)
+[ステム 3] ┤      ↓
+[ステム N] ┘   ② 空気吸収 (距離による音色変化)
+              ┌──────┴──────┐
+              ▼             ▼
+         ドライ (直接音)  ③ リバーブ (共有反響)
+              │             │
+              └──→ ミックス ←─┘ → 出力</pre>
+
+            <h3>4 人の専門家視点</h3>
+
+            <div class="step">
+                <b>① 空間音響エンジニア — HRTF</b>
+                <span class="quote">「人の耳は左右で別々の音色を聞いていて、その違いから方向を判断します」</span>
+                各ステムごとに独立した HRTF パンナーを持ち、頭・耳の形状を測定したデータを使って音が左右の耳に
+                <b>「いつ」「どんな音色で」</b>届くかを再現します。ボーカルは前、ドラムは後ろ、といった独立配置が可能です。
+                <span class="term">▼ HRTF = 頭部伝達関数。耳と頭の形が音を変化させる特性データ。</span>
+            </div>
+
+            <div class="step">
+                <b>② 音響物理学 — 空気吸収</b>
+                <span class="quote">「遠くの音はこもって聞こえる。これは空気が高音を吸収するからです」</span>
+                各ステムごとに、距離に応じた高音減衰フィルタが入っています。
+                遠くに置いたステムは自然に "こもった" 音色になり、距離感が耳でも感じられます。
+                <span class="term">▼ ローパスフィルタ = 高音を削るフィルタ。距離連動で 20kHz → 1.5kHz の範囲。</span>
+            </div>
+
+            <div class="step">
+                <b>③ 室内音響学 — 共有リバーブ</b>
+                <span class="quote">「すべての音が同じ部屋にあると感じさせるには、反響を共有する必要があります」</span>
+                すべてのステムは <b>同じリバーブ (反響)</b> に送られます。
+                これにより、ボーカル・ドラム・ベースが同じ空間で鳴っている一体感が生まれます。
+                各ステムごとに送る量も調整可能です。
+                <span class="term">▼ リバーブ = 反響・残響。空間の広がりを感じさせる。</span>
+            </div>
+
+            <div class="step">
+                <b>④ ミキシングエンジニア — 個別ボリューム & ミュート</b>
+                <span class="quote">「素材の聞こえ方は単独で確認しないと分からない」</span>
+                各ステムに <b>Volume / Mute / Solo</b> を備え、特定のステムだけ聞いて位置確認したり、
+                バランスを微調整できます。Solo はそのステムだけを再生し、他は一時的にミュートします。
+            </div>
+
+            <h3>パラメータ</h3>
+            <div class="param-list">
+                <div class="param-row"><span>音響モデル</span><b>HRTF</b></div>
+                <div class="param-row"><span>距離モデル</span><b>inverse</b></div>
+                <div class="param-row"><span>基準距離</span><b>1.5 m</b></div>
+                <div class="param-row"><span>最大距離</span><b>20 m</b></div>
+                <div class="param-row"><span>減衰係数</span><b>0.5</b></div>
+                <div class="param-row"><span>空気吸収カットオフ</span><b>20kHz → 1.5kHz</b></div>
+                <div class="param-row"><span>リバーブ長</span><b>約 1.5 秒</b></div>
+                <div class="param-row"><span>リバーブ送り (各ステム)</span><b>個別調整</b></div>
+                <div class="param-row"><span>同期方式</span><b>共通 audioCtx 時刻で start</b></div>
+            </div>
+
+            <div class="tips">
+                <b>🎧 効果を強く感じるコツ</b><br>
+                ・ ヘッドホン or イヤホンで試聴する<br>
+                ・ ボーカルを前、ドラムを後ろ、など意図的に離して配置する<br>
+                ・ Solo で各ステム単独で位置感を確認してから全部鳴らす<br>
+                ・ 上下方向は元音源に高音成分があるほど分かりやすい
+            </div>
+
+            <p class="note">
+                ※ <b>音源データそのものに 3D 位置情報は含まれていません</b>。本アプリでは<b>ファイル名</b> (vocals / drums / bass / guitar / piano / other) を見て、慣習的な配置に自動セットしているだけです。
+                該当しない名前の場合は円周上に等間隔配置されます。意図的な位置にしたい場合はパッドでドラッグしてください。
+            </p>
+
+            <button class="modal-close" data-close="algModal">閉じる</button>
         </div>
     </div>
 
 <script>
-    function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+    // ===== 状態 =====
+    let audioCtx = null;
+    let sharedReverb = null, reverbReturn = null, masterGain = null;
+    const stems = [];
+    let selectedStemId = null;
+    let isPlaying = false, is3D = false;
+    let startTime = 0, pausedAt = 0;
+    let masterDuration = 0;
+    let masterBuffer = null;
 
-    fetch('library.json', { cache: 'no-store' })
-        .then(r => { if (!r.ok) throw new Error('no library'); return r.json(); })
-        .then(lib => {
-            const songs = (lib && lib.songs) || [];
-            const list = document.getElementById('list');
-            if (!songs.length) {
-                list.innerHTML = '<div class="empty">まだ共有された曲はありません。<br>' +
-                    '上の「分離してプレイヤーを開く」から、自分の曲を分離して再生できます。</div>';
+    const COLORS = ['#00f2ff', '#ff3366', '#ffcb47', '#c47aff', '#00ff88', '#ff8800', '#7fb8ff', '#ff66cc'];
+
+    // ファイル名 → 初期位置のプリセット
+    const PRESET_POS = {
+        vocal:  { x:  0,  y:  0,   z: -2.5 },
+        vocals: { x:  0,  y:  0,   z: -2.5 },
+        drum:   { x:  0,  y:  0,   z:  2.5 },
+        drums:  { x:  0,  y:  0,   z:  2.5 },
+        bass:   { x:  0,  y: -1.0, z: -0.5 },
+        guitar: { x:  2.5,y:  0.5, z: -1.0 },
+        piano:  { x: -2.5,y:  0.5, z: -1.0 },
+        other:  { x:  0,  y:  1.5, z:  0   }
+    };
+
+    function getInitialPosition(name, fallbackIndex) {
+        const lower = name.toLowerCase();
+        for (const key in PRESET_POS) {
+            if (lower.includes(key)) return { ...PRESET_POS[key] };
+        }
+        const angle = (fallbackIndex % 8) / 8 * 2 * Math.PI - Math.PI / 2;
+        return { x: Math.cos(angle) * 2, y: 0, z: Math.sin(angle) * 2 };
+    }
+
+    const $ = (id) => document.getElementById(id);
+    const el = {
+        addBtn: $('addBtn'), fileInput: $('fileInput'),
+        playBtn: $('playBtn'), pauseBtn: $('pauseBtn'),
+        volSlider: $('volSlider'),
+        waveCanvas: $('waveCanvas'),
+        playhead: $('playhead'),
+        timeCurrent: $('timeCurrent'), timeTotal: $('timeTotal'),
+        toggle3D: $('toggle3D'),
+        positionCard: $('positionCard'),
+        pad: $('pad'),
+        heightSlider: $('heightSlider'),
+        xVal: $('xVal'), yVal: $('yVal'), zVal: $('zVal'),
+        resetBtn: $('resetBtn'),
+        stemsList: $('stemsList'),
+        selectedName: $('selectedName')
+    };
+
+    // ===== Audio Context 初期化 =====
+    function ensureCtx() {
+        if (!audioCtx) {
+            audioCtx = new AudioContext();
+            if (audioCtx.listener.forwardX) {
+                audioCtx.listener.forwardX.value = 0;
+                audioCtx.listener.forwardY.value = 0;
+                audioCtx.listener.forwardZ.value = -1;
+                audioCtx.listener.upX.value = 0;
+                audioCtx.listener.upY.value = 1;
+                audioCtx.listener.upZ.value = 0;
+            }
+            sharedReverb = audioCtx.createConvolver();
+            sharedReverb.buffer = createReverbIR(audioCtx, 1.5, 2.5);
+            reverbReturn = audioCtx.createGain();
+            reverbReturn.gain.value = 0.22;
+            masterGain = audioCtx.createGain();
+            masterGain.gain.value = parseFloat(el.volSlider.value);
+            sharedReverb.connect(reverbReturn).connect(masterGain);
+            masterGain.connect(audioCtx.destination);
+        }
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+
+    function createReverbIR(ctx, duration, decay) {
+        const sr = ctx.sampleRate;
+        const len = Math.floor(sr * duration);
+        const ir = ctx.createBuffer(2, len, sr);
+        for (let ch = 0; ch < 2; ch++) {
+            const data = ir.getChannelData(ch);
+            for (let i = 0; i < len; i++) {
+                const t = i / sr;
+                const env = Math.pow(1 - i / len, decay);
+                let s = (Math.random() * 2 - 1) * env;
+                if (t < 0.08) s *= (1 + (1 - t / 0.08) * 0.5);
+                data[i] = s;
+            }
+        }
+        return ir;
+    }
+
+    // ===== ステム追加 =====
+    el.addBtn.onclick = () => el.fileInput.click();
+    el.fileInput.onchange = async (e) => {
+        const files = Array.from(e.target.files || []);
+        e.target.value = '';
+        await addFilesAsStems(files);
+    };
+
+    // 複数の音声ファイルをステムとして取り込む。
+    // 「＋ 音源ファイルを追加」と「📁 フォルダから読み込む」の共通処理。
+    async function addFilesAsStems(files) {
+        if (!files.length) return;
+        ensureCtx();
+
+        // 再生中なら一旦停止
+        const wasPlaying = isPlaying;
+        if (wasPlaying) {
+            pausedAt = currentPos();
+            stopAllSources();
+        }
+
+        for (const file of files) {
+            try {
+                const arrBuf = await file.arrayBuffer();
+                const buffer = await audioCtx.decodeAudioData(arrBuf);
+                const name = file.name.replace(/\.[^.]+$/, '');
+                const pos = getInitialPosition(name, stems.length);
+                const stem = {
+                    id: 'stem_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+                    name: name,
+                    color: COLORS[stems.length % COLORS.length],
+                    buffer,
+                    posX: pos.x, posY: pos.y, posZ: pos.z,
+                    volume: 0.85,
+                    muted: false,
+                    solo: false,
+                    nodes: null
+                };
+                stems.push(stem);
+            } catch (err) {
+                alert(`${file.name} の読み込みに失敗しました: ${err.message}`);
+            }
+        }
+
+        // 最長を maser として記録
+        masterBuffer = stems.reduce((longest, s) =>
+            (!longest || s.buffer.duration > longest.duration) ? s.buffer : longest, null);
+        masterDuration = masterBuffer ? masterBuffer.duration : 0;
+        el.timeTotal.textContent = formatTime(masterDuration);
+
+        if (!selectedStemId && stems.length) selectedStemId = stems[0].id;
+        rebuildStemList();
+        rebuildPadDots();
+        drawWaveform(masterBuffer);
+        el.playhead.style.display = 'block';
+        updatePlayhead();
+        updateSelectedInfo();
+        el.playBtn.disabled = stems.length === 0;
+
+        if (wasPlaying) playAll(pausedAt);
+    }
+
+    // ===== ブラウザ内分離モジュール(下部の module script)向けの取り込みAPI =====
+    // プレイヤーの AudioContext を貸し出す（分離結果を同じ ctx の AudioBuffer にするため）
+    window.getAudioCtxForStems = function () { ensureCtx(); return audioCtx; };
+
+    // 分離済みステム [{name, buffer(AudioBuffer)}...] をプレイヤーに読み込む。
+    // 【2026-09-06】分離は「1曲まるごと」の結果なので、前に読み込んでいた曲は置き換える。
+    // 追記にすると、リストから曲を選んだあとに別の曲を分離したとき、
+    // 2曲ぶんのトラックが混ざって同時に鳴ってしまうため。
+    window.addStemsFromAudioBuffers = function (list) {
+        ensureCtx();
+        if (isPlaying) stopAllSources();
+        try { stems.forEach(s => { if (s.nodes) disconnectStemNodes(s); }); } catch (e) {}
+        stems.length = 0;
+        selectedStemId = null;
+        pausedAt = 0;
+        const wasPlaying = false;
+        for (const item of list) {
+            const name = item.name;
+            const pos = getInitialPosition(name, stems.length);
+            stems.push({
+                id: 'stem_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+                name: name,
+                color: COLORS[stems.length % COLORS.length],
+                buffer: item.buffer,
+                posX: pos.x, posY: pos.y, posZ: pos.z,
+                volume: 0.85, muted: false, solo: false, nodes: null
+            });
+        }
+        masterBuffer = stems.reduce((longest, s) =>
+            (!longest || s.buffer.duration > longest.duration) ? s.buffer : longest, null);
+        masterDuration = masterBuffer ? masterBuffer.duration : 0;
+        el.timeTotal.textContent = formatTime(masterDuration);
+        if (!selectedStemId && stems.length) selectedStemId = stems[0].id;
+        rebuildStemList();
+        rebuildPadDots();
+        drawWaveform(masterBuffer);
+        el.playhead.style.display = 'block';
+        updatePlayhead();
+        updateSelectedInfo();
+        el.playBtn.disabled = stems.length === 0;
+        if (wasPlaying) playAll(pausedAt);
+    };
+
+    // ===== UI 構築 =====
+    function rebuildStemList() {
+        if (!stems.length) {
+            el.stemsList.innerHTML = '<div class="stems-empty">「＋ 音源ファイルを追加」から、分離済みの音源 (vocals.wav / drums.wav 等) を複数選択してください<br><span style="font-size:11px;color:#6666aa;">※ Ctrl/Shift + クリックで複数ファイルをまとめて選択できます</span></div>';
+            return;
+        }
+        el.stemsList.innerHTML = '';
+        stems.forEach(stem => {
+            const row = document.createElement('div');
+            row.className = 'stem-row' + (stem.id === selectedStemId ? ' selected' : '');
+            row.innerHTML = `
+                <div class="stem-color" style="color:${stem.color}"></div>
+                <div class="stem-name" title="${stem.name}">${stem.name}</div>
+                <input type="range" class="stem-vol" min="0" max="1" step="0.01" value="${stem.volume}" title="この音源の音量">
+                <button class="stem-btn M ${stem.muted ? 'active' : ''}" title="ミュート (この音だけを消す)">M</button>
+                <button class="stem-btn S ${stem.solo ? 'active' : ''}" title="ソロ (この音だけを聞く)">S</button>
+                <button class="stem-btn X" title="一覧から削除">×</button>
+            `;
+            row.onclick = (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+                selectStem(stem.id);
+            };
+            const [volSlider, mBtn, sBtn, xBtn] = row.querySelectorAll('input, button');
+            volSlider.oninput = (e) => {
+                stem.volume = parseFloat(e.target.value);
+                applyStemMixer();
+            };
+            mBtn.onclick = (e) => { e.stopPropagation(); stem.muted = !stem.muted; mBtn.classList.toggle('active', stem.muted); applyStemMixer(); };
+            sBtn.onclick = (e) => { e.stopPropagation(); stem.solo = !stem.solo; sBtn.classList.toggle('active', stem.solo); applyStemMixer(); };
+            xBtn.onclick = (e) => { e.stopPropagation(); removeStem(stem.id); };
+            el.stemsList.appendChild(row);
+        });
+    }
+
+    function rebuildPadDots() {
+        // 既存ドット削除
+        el.pad.querySelectorAll('.stem-dot').forEach(d => d.remove());
+        const padW = el.pad.offsetWidth || 360;
+        const padH = el.pad.offsetHeight || 360;
+        stems.forEach(stem => {
+            const dot = document.createElement('div');
+            dot.className = 'stem-dot' + (stem.id === selectedStemId ? ' selected' : '');
+            dot.style.color = stem.color;
+            dot.dataset.id = stem.id;
+            const left = (stem.posX / 5) * (padW / 2) + (padW / 2);
+            const top  = (stem.posZ / 5) * (padH / 2) + (padH / 2);
+            dot.style.left = left + 'px';
+            dot.style.top  = top  + 'px';
+            const label = document.createElement('div');
+            label.className = 'stem-dot-label';
+            label.textContent = stem.name;
+            dot.appendChild(label);
+            el.pad.appendChild(dot);
+        });
+    }
+
+    function selectStem(id) {
+        selectedStemId = id;
+        const stem = stems.find(s => s.id === id);
+        if (stem) {
+            el.heightSlider.value = stem.posY;
+        }
+        rebuildStemList();
+        // ドットだけ再描画 (位置は維持)
+        el.pad.querySelectorAll('.stem-dot').forEach(d => {
+            d.classList.toggle('selected', d.dataset.id === id);
+        });
+        updateSelectedInfo();
+    }
+
+    function removeStem(id) {
+        const idx = stems.findIndex(s => s.id === id);
+        if (idx < 0) return;
+        const wasPlaying = isPlaying;
+        if (wasPlaying) { pausedAt = currentPos(); stopAllSources(); }
+        const stem = stems[idx];
+        if (stem.nodes) disconnectStemNodes(stem);
+        stems.splice(idx, 1);
+        if (selectedStemId === id) selectedStemId = stems[0]?.id || null;
+        masterBuffer = stems.reduce((longest, s) =>
+            (!longest || s.buffer.duration > longest.duration) ? s.buffer : longest, null);
+        masterDuration = masterBuffer ? masterBuffer.duration : 0;
+        el.timeTotal.textContent = formatTime(masterDuration);
+        rebuildStemList();
+        rebuildPadDots();
+        if (masterBuffer) drawWaveform(masterBuffer);
+        else { clearWaveform(); el.playhead.style.display = 'none'; }
+        updateSelectedInfo();
+        el.playBtn.disabled = stems.length === 0;
+        if (wasPlaying && stems.length) playAll(pausedAt);
+    }
+
+    function updateSelectedInfo() {
+        const stem = stems.find(s => s.id === selectedStemId);
+        if (!stem) {
+            el.selectedName.textContent = '-';
+            el.xVal.textContent = el.yVal.textContent = el.zVal.textContent = '0.0';
+            el.positionCard.classList.add('disabled');
+            return;
+        }
+        el.selectedName.textContent = stem.name;
+        el.xVal.textContent = stem.posX.toFixed(1);
+        el.yVal.textContent = stem.posY.toFixed(1);
+        el.zVal.textContent = stem.posZ.toFixed(1);
+        el.heightSlider.value = stem.posY;
+        if (is3D) el.positionCard.classList.remove('disabled');
+    }
+
+    // ===== 波形 =====
+    function drawWaveform(buffer) {
+        const c = el.waveCanvas;
+        const ctx = c.getContext('2d');
+        c.width = c.offsetWidth;
+        c.height = 60;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, c.width, c.height);
+        const data = buffer.getChannelData(0);
+        const step = Math.ceil(data.length / c.width);
+        ctx.strokeStyle = '#00f2ff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let i = 0; i < c.width; i++) {
+            let min = 1, max = -1;
+            for (let j = 0; j < step; j++) {
+                const d = data[i * step + j];
+                if (d < min) min = d;
+                if (d > max) max = d;
+            }
+            ctx.moveTo(i, (1 + min) * 30);
+            ctx.lineTo(i, (1 + max) * 30);
+        }
+        ctx.stroke();
+    }
+
+    function clearWaveform() {
+        const c = el.waveCanvas;
+        const ctx = c.getContext('2d');
+        c.width = c.offsetWidth;
+        c.height = 60;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, c.width, c.height);
+    }
+
+    // ===== 再生制御 =====
+    function buildStemNodes(stem) {
+        const sr = audioCtx.sampleRate;
+        const source = audioCtx.createBufferSource();
+        source.buffer = stem.buffer;
+        source.loop = true;
+
+        const volumeGain = audioCtx.createGain();
+        volumeGain.gain.value = stem.volume;
+
+        const directGain = audioCtx.createGain();
+        directGain.gain.value = is3D ? 0 : 1;
+
+        const panner = new PannerNode(audioCtx, {
+            panningModel: 'HRTF',
+            distanceModel: 'inverse',
+            refDistance: 1.5,
+            maxDistance: 20,
+            rolloffFactor: 0.5,
+            coneInnerAngle: 360,
+            coneOuterAngle: 360,
+            coneOuterGain: 1
+        });
+        panner.positionX.value = stem.posX;
+        panner.positionY.value = stem.posY;
+        panner.positionZ.value = stem.posZ;
+
+        const airLPF = audioCtx.createBiquadFilter();
+        airLPF.type = 'lowpass';
+        airLPF.frequency.value = computeLPFCutoff(stem);
+        airLPF.Q.value = 0.5;
+
+        const threeDGain = audioCtx.createGain();
+        threeDGain.gain.value = is3D ? 1 : 0;
+
+        const reverbSend = audioCtx.createGain();
+        reverbSend.gain.value = 0.5; // ステムごとのリバーブ送り量
+
+        // 接続
+        source.connect(volumeGain);
+        volumeGain.connect(directGain).connect(masterGain);
+        volumeGain.connect(panner);
+        panner.connect(airLPF);
+        airLPF.connect(threeDGain).connect(masterGain);
+        airLPF.connect(reverbSend).connect(sharedReverb);
+
+        return { source, volumeGain, directGain, panner, airLPF, threeDGain, reverbSend };
+    }
+
+    function disconnectStemNodes(stem) {
+        if (!stem.nodes) return;
+        const n = stem.nodes;
+        try { n.source.stop(); } catch (_) {}
+        for (const k of ['source','volumeGain','directGain','panner','airLPF','threeDGain','reverbSend']) {
+            try { n[k].disconnect(); } catch (_) {}
+        }
+        stem.nodes = null;
+    }
+
+    function playAll(offset) {
+        if (!stems.length) return;
+        if (isPlaying) stopAllSources();
+        const startAt = audioCtx.currentTime + 0.05; // 全ステムを同時 start
+        stems.forEach(stem => {
+            stem.nodes = buildStemNodes(stem);
+            const stemOffset = offset % stem.buffer.duration;
+            stem.nodes.source.start(startAt, stemOffset);
+        });
+        startTime = startAt - offset;
+        isPlaying = true;
+        el.playBtn.disabled = true;
+        el.pauseBtn.disabled = false;
+        applyStemMixer();
+    }
+
+    function stopAllSources() {
+        stems.forEach(stem => disconnectStemNodes(stem));
+        isPlaying = false;
+    }
+
+    function currentPos() {
+        if (!isPlaying) return pausedAt;
+        return Math.max(0, (audioCtx.currentTime - startTime) % masterDuration);
+    }
+
+    el.playBtn.onclick = () => {
+        ensureCtx();
+        playAll(pausedAt);
+    };
+    el.pauseBtn.onclick = () => {
+        if (!isPlaying) return;
+        pausedAt = currentPos();
+        stopAllSources();
+        el.playBtn.disabled = false;
+        el.pauseBtn.disabled = true;
+    };
+    el.volSlider.oninput = () => { if (masterGain) masterGain.gain.value = parseFloat(el.volSlider.value); };
+
+    // ===== 立体音響 ON/OFF =====
+    el.toggle3D.onclick = () => {
+        is3D = !is3D;
+        el.toggle3D.classList.toggle('on', is3D);
+        if (stems.length) el.positionCard.classList.toggle('disabled', !is3D);
+        applyMode();
+    };
+
+    function applyMode() {
+        if (!audioCtx) return;
+        const t = audioCtx.currentTime;
+        stems.forEach(stem => {
+            if (!stem.nodes) return;
+            stem.nodes.directGain.gain.setTargetAtTime(is3D ? 0 : 1, t, 0.03);
+            stem.nodes.threeDGain.gain.setTargetAtTime(is3D ? 1 : 0, t, 0.03);
+            stem.nodes.reverbSend.gain.setTargetAtTime(is3D ? 0.5 : 0, t, 0.03);
+        });
+    }
+
+    // ===== ミキサー (Mute / Solo / Volume) =====
+    function applyStemMixer() {
+        const anySolo = stems.some(s => s.solo);
+        const t = audioCtx ? audioCtx.currentTime : 0;
+        stems.forEach(stem => {
+            const audible = anySolo ? stem.solo : !stem.muted;
+            const target = audible ? stem.volume : 0;
+            if (stem.nodes && audioCtx) {
+                stem.nodes.volumeGain.gain.setTargetAtTime(target, t, 0.02);
+            }
+        });
+    }
+
+    // ===== 位置反映 =====
+    function computeLPFCutoff(stem) {
+        const dist = Math.sqrt(stem.posX ** 2 + stem.posY ** 2 + stem.posZ ** 2);
+        return Math.max(1500, 20000 - dist * dist * 250);
+    }
+
+    function applyStemPosition(stem) {
+        if (stem.nodes) {
+            const t = audioCtx.currentTime;
+            stem.nodes.panner.positionX.setTargetAtTime(stem.posX, t, 0.02);
+            stem.nodes.panner.positionY.setTargetAtTime(stem.posY, t, 0.02);
+            stem.nodes.panner.positionZ.setTargetAtTime(stem.posZ, t, 0.02);
+            stem.nodes.airLPF.frequency.setTargetAtTime(computeLPFCutoff(stem), t, 0.05);
+        }
+        // ドット更新
+        const padW = el.pad.offsetWidth || 360;
+        const padH = el.pad.offsetHeight || 360;
+        const dot = el.pad.querySelector(`.stem-dot[data-id="${stem.id}"]`);
+        if (dot) {
+            dot.style.left = ((stem.posX / 5) * (padW / 2) + (padW / 2)) + 'px';
+            dot.style.top  = ((stem.posZ / 5) * (padH / 2) + (padH / 2)) + 'px';
+        }
+        if (stem.id === selectedStemId) updateSelectedInfo();
+    }
+
+    // ===== パッド操作 =====
+    function findStemAtPad(px, py) {
+        const padW = el.pad.offsetWidth;
+        const padH = el.pad.offsetHeight;
+        let nearest = null;
+        let minDist = 25; // px
+        for (const stem of stems) {
+            const sx = (stem.posX / 5) * (padW / 2) + (padW / 2);
+            const sy = (stem.posZ / 5) * (padH / 2) + (padH / 2);
+            const d = Math.hypot(px - sx, py - sy);
+            if (d < minDist) { minDist = d; nearest = stem; }
+        }
+        return nearest;
+    }
+
+    function setStemPosFromEvent(stem, ev) {
+        const rect = el.pad.getBoundingClientRect();
+        const cx = ev.clientX !== undefined ? ev.clientX : ev.touches[0].clientX;
+        const cy = ev.clientY !== undefined ? ev.clientY : ev.touches[0].clientY;
+        const x = (cx - rect.left - rect.width / 2) / (rect.width / 2) * 5;
+        const z = (cy - rect.top - rect.height / 2) / (rect.height / 2) * 5;
+        const r = Math.hypot(x, z);
+        if (r > 5) { stem.posX = x / r * 5; stem.posZ = z / r * 5; }
+        else { stem.posX = x; stem.posZ = z; }
+        applyStemPosition(stem);
+    }
+
+    el.pad.addEventListener('mousedown', (e) => {
+        if (!stems.length) return;
+        e.preventDefault();
+        const rect = el.pad.getBoundingClientRect();
+        const px = e.clientX - rect.left;
+        const py = e.clientY - rect.top;
+        const hit = findStemAtPad(px, py);
+        if (hit) selectStem(hit.id);
+        const target = stems.find(s => s.id === selectedStemId);
+        if (!target) return;
+        if (!hit) setStemPosFromEvent(target, e);
+        const move = (ev) => setStemPosFromEvent(target, ev);
+        const up = () => {
+            window.removeEventListener('mousemove', move);
+            window.removeEventListener('mouseup', up);
+        };
+        window.addEventListener('mousemove', move);
+        window.addEventListener('mouseup', up);
+    });
+
+    el.pad.addEventListener('touchstart', (e) => {
+        if (!stems.length) return;
+        e.preventDefault();
+        const rect = el.pad.getBoundingClientRect();
+        const t0 = e.touches[0];
+        const px = t0.clientX - rect.left;
+        const py = t0.clientY - rect.top;
+        const hit = findStemAtPad(px, py);
+        if (hit) selectStem(hit.id);
+        const target = stems.find(s => s.id === selectedStemId);
+        if (!target) return;
+        if (!hit) setStemPosFromEvent(target, e);
+        const move = (ev) => { ev.preventDefault(); setStemPosFromEvent(target, ev); };
+        const up = () => {
+            window.removeEventListener('touchmove', move);
+            window.removeEventListener('touchend', up);
+        };
+        window.addEventListener('touchmove', move, { passive: false });
+        window.addEventListener('touchend', up);
+    }, { passive: false });
+
+    el.heightSlider.oninput = () => {
+        const stem = stems.find(s => s.id === selectedStemId);
+        if (!stem) return;
+        stem.posY = parseFloat(el.heightSlider.value);
+        applyStemPosition(stem);
+    };
+
+    el.resetBtn.onclick = () => {
+        const stem = stems.find(s => s.id === selectedStemId);
+        if (!stem) return;
+        stem.posX = 0; stem.posY = 0; stem.posZ = 0;
+        el.heightSlider.value = 0;
+        applyStemPosition(stem);
+    };
+
+    // ===== タイムライン =====
+    let isSeeking = false, wasPlayingBeforeSeek = false;
+
+    function formatTime(sec) {
+        if (!isFinite(sec)) return '0:00';
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return m + ':' + String(s).padStart(2, '0');
+    }
+
+    function updatePlayhead() {
+        if (!masterBuffer) return;
+        const pos = currentPos();
+        const ratio = pos / masterDuration;
+        el.playhead.style.left = (ratio * el.waveCanvas.offsetWidth) + 'px';
+        el.timeCurrent.textContent = formatTime(pos);
+    }
+
+    function tick() {
+        if (!isSeeking) updatePlayhead();
+        requestAnimationFrame(tick);
+    }
+    tick();
+
+    function seekFromX(clientX) {
+        const rect = el.waveCanvas.getBoundingClientRect();
+        let ratio = (clientX - rect.left) / rect.width;
+        ratio = Math.max(0, Math.min(1, ratio));
+        pausedAt = ratio * masterDuration;
+        updatePlayhead();
+    }
+
+    el.waveCanvas.addEventListener('mousedown', (e) => {
+        if (!masterBuffer) return;
+        e.preventDefault();
+        isSeeking = true;
+        wasPlayingBeforeSeek = isPlaying;
+        if (isPlaying) {
+            pausedAt = currentPos();
+            stopAllSources();
+        }
+        seekFromX(e.clientX);
+    });
+    window.addEventListener('mousemove', (e) => {
+        if (isSeeking) seekFromX(e.clientX);
+    });
+    window.addEventListener('mouseup', () => {
+        if (!isSeeking) return;
+        isSeeking = false;
+        if (wasPlayingBeforeSeek) playAll(pausedAt);
+        else { el.playBtn.disabled = stems.length === 0; el.pauseBtn.disabled = true; }
+    });
+    el.waveCanvas.addEventListener('touchstart', (e) => {
+        if (!masterBuffer) return;
+        e.preventDefault();
+        isSeeking = true;
+        wasPlayingBeforeSeek = isPlaying;
+        if (isPlaying) { pausedAt = currentPos(); stopAllSources(); }
+        seekFromX(e.touches[0].clientX);
+    }, { passive: false });
+    window.addEventListener('touchmove', (e) => {
+        if (isSeeking) seekFromX(e.touches[0].clientX);
+    }, { passive: false });
+    window.addEventListener('touchend', () => {
+        if (!isSeeking) return;
+        isSeeking = false;
+        if (wasPlayingBeforeSeek) playAll(pausedAt);
+    });
+
+    // ===== モーダル =====
+    document.getElementById('helpBtn').onclick = () => $('helpModal').classList.add('show');
+    document.getElementById('algBtn').onclick  = () => $('algModal').classList.add('show');
+    document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $(b.dataset.close).classList.remove('show'));
+    document.querySelectorAll('.modal-overlay').forEach(ov => {
+        ov.addEventListener('click', (e) => { if (e.target === ov) ov.classList.remove('show'); });
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') document.querySelectorAll('.modal-overlay.show').forEach(m => m.classList.remove('show'));
+    });
+
+    // リサイズ対応
+    window.addEventListener('resize', () => {
+        if (masterBuffer) drawWaveform(masterBuffer);
+        rebuildPadDots();
+        updatePlayhead();
+    });
+
+    // 初期 UI
+    rebuildStemList();
+    updateSelectedInfo();
+</script>
+
+<!-- ▼ ライブラリ連携（GitHub Pages 静的版）: library.json と songs/ から読み込む -->
+<script>
+    let __library = null;
+    async function getLibrary() {
+        if (__library) return __library;
+        const r = await fetch('library.json', { cache: 'no-store' });
+        if (!r.ok) throw new Error('library.json を読み込めません');
+        __library = await r.json();
+        return __library;
+    }
+
+    // ライブラリの曲(ID)を読み込んで stems[] に反映。既存プレイヤー関数を再利用します。
+    window.loadStemLibrary = async function (songId) {
+        try { ensureCtx(); } catch (e) {}
+        try { if (typeof isPlaying !== 'undefined' && isPlaying && typeof stopAllSources === 'function') stopAllSources(); } catch (e) {}
+        try { stems.forEach(s => { if (s.nodes && typeof disconnectStemNodes === 'function') disconnectStemNodes(s); }); } catch (e) {}
+        stems.length = 0;
+        selectedStemId = null;
+
+        let song;
+        try {
+            const lib = await getLibrary();
+            song = (lib.songs || []).find(s => s.id === songId);
+            if (!song) throw new Error('曲が見つかりません: ' + songId);
+        } catch (err) {
+            alert('ライブラリの読み込みに失敗しました: ' + err.message);
+            return;
+        }
+
+        for (const stemFile of (song.stems || [])) {
+            const url = 'songs/' + encodeURIComponent(song.id) + '/' + encodeURIComponent(stemFile);
+            try {
+                const r = await fetch(url);
+                const arrBuf = await r.arrayBuffer();
+                const buffer = await audioCtx.decodeAudioData(arrBuf);
+                const name = stemFile.replace(/\.[^.]+$/, '');
+                const pos = getInitialPosition(name, stems.length);
+                stems.push({
+                    id: 'stem_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+                    name: name,
+                    color: COLORS[stems.length % COLORS.length],
+                    buffer: buffer,
+                    posX: pos.x, posY: pos.y, posZ: pos.z,
+                    volume: 0.85, muted: false, solo: false, nodes: null
+                });
+            } catch (err) {
+                console.error('ステム読み込み失敗:', url, err);
+            }
+        }
+
+        masterBuffer = stems.reduce((longest, s) =>
+            (!longest || s.buffer.duration > longest.duration) ? s.buffer : longest, null);
+        masterDuration = masterBuffer ? masterBuffer.duration : 0;
+        el.timeTotal.textContent = formatTime(masterDuration);
+        if (!selectedStemId && stems.length) selectedStemId = stems[0].id;
+        rebuildStemList();
+        rebuildPadDots();
+        if (masterBuffer) drawWaveform(masterBuffer);
+        el.playhead.style.display = 'block';
+        updatePlayhead();
+        updateSelectedInfo();
+        el.playBtn.disabled = stems.length === 0;
+    };
+
+    // 上部に曲切り替えセレクタを差し込む
+    // ============================================================================
+    // 曲リスト・作業フォルダ・分離結果の保存（2026-09-06 追加）
+    //
+    // 【方針】分離結果はメモリ上にしか無く、タブを閉じると消えてしまう。そこで
+    //   ・あらかじめ「作業フォルダ」を選んでおく
+    //   ・分離が終わったら <作業フォルダ>/<曲名>/ を作り、元の曲と分離結果を自動保存
+    //   ・次回はそのフォルダを読み、上の「曲:」から分離せずに再生できる
+    // という往復にする。File System Access API を使うため、保存も読み込みも
+    // すべて利用者のPCの中だけで完結する（サーバーへは何も送らない）。
+    //
+    // 非対応ブラウザ（Firefox / Safari 等）では、従来どおり
+    //   ・保存 = ファイルのダウンロード
+    //   ・読み込み = 「📁 フォルダから読み込む」（webkitdirectory）
+    // にフォールバックする。
+    // ============================================================================
+    (function librarySection() {
+        const container = document.querySelector('.container');
+        if (!container) return;
+
+        const FS_OK = (typeof window.showDirectoryPicker === 'function') && window.isSecureContext;
+        const AUDIO_RE = /\.(wav|mp3|flac|m4a|aac|ogg|opus|webm)$/i;
+        const SOURCE_RE = /^source\./i;          // 元の曲のコピー。パートとしては読み込まない
+        const EXPORT_CHUNK_FRAMES = 1 << 18;     // 262,144フレーム ≒ 6秒 ≒ 約1MB(16bit stereo)
+        const IDB_NAME = 'stereophonic-fs', IDB_STORE = 'handles', IDB_KEY = 'workdir';
+
+        // ---- 上部バー（曲セレクタ / フォルダ読み込み） ----
+        const bar = document.createElement('div');
+        bar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:6px;flex-wrap:wrap;';
+        bar.innerHTML =
+            '<label for="libSelect" style="font-size:11px;color:#8888aa;letter-spacing:1px;">曲:</label>' +
+            '<select id="libSelect" style="flex:1;min-width:160px;background:#14142b;color:#e0e0ff;' +
+            'border:1px solid rgba(0,242,255,0.3);border-radius:8px;padding:8px 10px;font-size:13px;">' +
+            '<option value="">— 選択 —</option></select>' +
+            '<button class="btn small" id="folderPickBtn" title="分離済みの音源が入ったフォルダを選びます">📁 フォルダから読み込む</button>' +
+            '<input type="file" id="folderInput" webkitdirectory directory multiple style="display:none">';
+        container.insertBefore(bar, container.firstChild);
+
+        const panel = document.createElement('div');
+        panel.id = 'folderPanel';
+        panel.style.cssText = 'margin-bottom:14px;font-size:12px;color:#9a9ac8;line-height:1.7;display:none;';
+        container.insertBefore(panel, bar.nextSibling);
+
+        const sel = bar.querySelector('#libSelect');
+        const folderBtn = bar.querySelector('#folderPickBtn');
+        const folderInput = bar.querySelector('#folderInput');
+        const wdPickBtn = document.getElementById('wdPickBtn');
+        const wdRescanBtn = document.getElementById('wdRescanBtn');
+        const wdClearBtn = document.getElementById('wdClearBtn');
+        const wdNameEl = document.getElementById('wdName');
+        const wdStatusEl = document.getElementById('wdStatus');
+        const wdNoteEl = document.getElementById('wdNote');
+        const saveEl = document.getElementById('sepSave');
+        const saveNoteEl = document.getElementById('sepSaveNote');
+        const saveBtnsEl = document.getElementById('sepSaveBtns');
+        const saveStatusEl = document.getElementById('sepSaveStatus');
+
+        let libSongs = [];        // 公開ライブラリ（library.json）
+        let workdirSongs = [];    // 作業フォルダの中で見つかった曲
+        let workdirHandle = null;
+        let pendingHandle = null; // 前回の作業フォルダ。使うには許可のクリックが要る
+        let busySaving = false;
+
+        const escapeHtml = (t) => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        const setWdStatus = (t) => { wdStatusEl.textContent = t; };
+
+        function sanitizeName(name) {
+            return (name || 'song')
+                .replace(/\.[^.]+$/, '')                       // 拡張子を落とす
+                .replace(/[\\\/:*?"<>|\x00-\x1f]/g, '_')       // フォルダ名に使えない文字
+                .replace(/\s+/g, ' ').trim().slice(0, 60) || 'song';
+        }
+
+        // ===== WAV(16bit PCM) 書き出し =========================================
+        // 【メモリ方針】曲全体ぶんの巨大な配列は作らない。約1MBずつ切り出して
+        // 書き込み、そのつど捨てる。2026-08-17 のメモリ最適化を無駄にしないため。
+        function wavHeader(frames, sampleRate, channels) {
+            const dataSize = frames * channels * 2;
+            const v = new DataView(new ArrayBuffer(44));
+            const ascii = (off, str) => { for (let i = 0; i < str.length; i++) v.setUint8(off + i, str.charCodeAt(i)); };
+            ascii(0, 'RIFF'); v.setUint32(4, 36 + dataSize, true); ascii(8, 'WAVE');
+            ascii(12, 'fmt '); v.setUint32(16, 16, true);
+            v.setUint16(20, 1, true);                    // PCM
+            v.setUint16(22, channels, true);
+            v.setUint32(24, sampleRate, true);
+            v.setUint32(28, sampleRate * channels * 2, true);
+            v.setUint16(32, channels * 2, true);
+            v.setUint16(34, 16, true);                   // 16bit
+            ascii(36, 'data'); v.setUint32(40, dataSize, true);
+            return new Uint8Array(v.buffer);
+        }
+
+        // WAVを先頭から順に細切れで生成する。Int16Array のバイト列はリトルエンディアン
+        // 前提（現行の実用ブラウザはすべてLE）。
+        function* wavParts(buffer) {
+            const ch = Math.min(2, buffer.numberOfChannels);
+            const frames = buffer.length;
+            const L = buffer.getChannelData(0);
+            const R = ch > 1 ? buffer.getChannelData(1) : L;
+            yield wavHeader(frames, buffer.sampleRate, ch);
+            for (let off = 0; off < frames; off += EXPORT_CHUNK_FRAMES) {
+                const n = Math.min(EXPORT_CHUNK_FRAMES, frames - off);
+                const pcm = new Int16Array(n * ch);
+                for (let i = 0; i < n; i++) {
+                    let l = L[off + i]; l = l < -1 ? -1 : (l > 1 ? 1 : l);
+                    pcm[i * ch] = l < 0 ? l * 0x8000 : l * 0x7FFF;
+                    if (ch > 1) {
+                        let r = R[off + i]; r = r < -1 ? -1 : (r > 1 ? 1 : r);
+                        pcm[i * ch + 1] = r < 0 ? r * 0x8000 : r * 0x7FFF;
+                    }
+                }
+                yield new Uint8Array(pcm.buffer);
+            }
+        }
+        const wavByteSize = (buffer) => 44 + buffer.length * Math.min(2, buffer.numberOfChannels) * 2;
+
+        function triggerDownload(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 60000);   // 保存開始前に無効化しないよう猶予を置く
+        }
+
+        // ===== 作業フォルダ（File System Access API） ==========================
+        function idbOpen() {
+            return new Promise((res, rej) => {
+                const r = indexedDB.open(IDB_NAME, 1);
+                r.onupgradeneeded = () => r.result.createObjectStore(IDB_STORE);
+                r.onsuccess = () => res(r.result);
+                r.onerror = () => rej(r.error);
+            });
+        }
+        async function idbGet(key) {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const q = db.transaction(IDB_STORE).objectStore(IDB_STORE).get(key);
+                q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+            });
+        }
+        async function idbPut(key, val) {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const q = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).put(val, key);
+                q.onsuccess = () => res(); q.onerror = () => rej(q.error);
+            });
+        }
+        async function idbDel(key) {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const q = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).delete(key);
+                q.onsuccess = () => res(); q.onerror = () => rej(q.error);
+            });
+        }
+
+        async function hasPermission(handle, request) {
+            const opts = { mode: 'readwrite' };
+            try {
+                if ((await handle.queryPermission(opts)) === 'granted') return true;
+                if (!request) return false;
+                return (await handle.requestPermission(opts)) === 'granted';
+            } catch (e) { return false; }
+        }
+
+        // 作業フォルダの中を見て、曲（＝サブフォルダ）の一覧を作る
+        async function scanWorkdir() {
+            workdirSongs = [];
+            if (!workdirHandle) return;
+            for await (const [name, h] of workdirHandle.entries()) {
+                if (h.kind !== 'directory') continue;
+                const stems = [], sources = [];
+                for await (const [fn, fh] of h.entries()) {
+                    if (fh.kind !== 'file' || !AUDIO_RE.test(fn)) continue;
+                    (SOURCE_RE.test(fn) ? sources : stems).push({ name: fn, handle: fh });
+                }
+                if (stems.length || sources.length) {
+                    stems.sort((a, b) => a.name.localeCompare(b.name));
+                    workdirSongs.push({ name, stems, source: sources[0] || null });
+                }
+            }
+            workdirSongs.sort((a, b) => a.name.localeCompare(b.name));
+        }
+
+        function updateWorkdirUI() {
+            if (!FS_OK) {
+                wdNoteEl.innerHTML = 'このブラウザは作業フォルダへの直接保存に対応していません（<b>PCのChrome / Edge</b> で使えます）。' +
+                    'このブラウザでは、分離後に表示される<b>ダウンロードボタン</b>で保存し、' +
+                    '再生するときは上の「<b>📁 フォルダから読み込む</b>」で保存先フォルダを選んでください。';
+                wdPickBtn.style.display = 'none';
                 return;
             }
-            list.innerHTML = songs.map(s => `
-                <div class="song">
-                    <div class="meta">
-                        <div class="title">${escapeHtml(s.name || s.id)}</div>
-                        <div class="info">${(s.stems||[]).length} トラック</div>
-                    </div>
-                    <a class="btn play" href="player.html?song=${encodeURIComponent(s.id)}">▶ 再生</a>
-                </div>`).join('');
-        })
-        .catch(() => {
-            document.getElementById('list').innerHTML =
-                '<div class="empty">まだ共有された曲はありません。<br>' +
-                '上の「分離してプレイヤーを開く」から、自分の曲を分離して再生できます。</div>';
+            if (workdirHandle) {
+                wdNameEl.textContent = '現在の保存先: ' + workdirHandle.name;
+                wdPickBtn.textContent = '📂 別のフォルダに変更';
+                wdRescanBtn.style.display = '';
+                wdClearBtn.style.display = '';
+                folderBtn.style.display = 'none';   // 作業フォルダがあれば従来のフォルダ読み込みは不要
+            } else if (pendingHandle) {
+                wdNameEl.textContent = '前回の保存先: ' + pendingHandle.name;
+                wdPickBtn.textContent = '📂 前回のフォルダを使う（' + pendingHandle.name + '）';
+                wdRescanBtn.style.display = 'none';
+                wdClearBtn.style.display = '';
+            } else {
+                wdNameEl.textContent = '';
+                wdPickBtn.textContent = '📂 作業フォルダを選ぶ';
+                wdRescanBtn.style.display = 'none';
+                wdClearBtn.style.display = 'none';
+            }
+        }
+
+        async function refreshWorkdir(quiet) {
+            try {
+                if (!quiet) setWdStatus('フォルダを読み込んでいます…');
+                await scanWorkdir();
+                populateSelect();
+                setWdStatus(workdirSongs.length
+                    ? `✅ ${workdirSongs.length}曲が見つかりました。上の「曲:」から選んで再生できます。`
+                    : 'このフォルダにはまだ曲がありません。下で曲を分離すると、ここに保存されます。');
+            } catch (e) {
+                console.error(e);
+                setWdStatus('❌ フォルダを読み込めませんでした: ' + e.message);
+            }
+            updateWorkdirUI();
+        }
+
+        async function pickWorkdir() {
+            try {
+                // 前回のフォルダが残っていれば、選び直さずに許可だけ取る
+                if (pendingHandle) {
+                    if (await hasPermission(pendingHandle, true)) {
+                        workdirHandle = pendingHandle; pendingHandle = null;
+                        await refreshWorkdir();
+                        return;
+                    }
+                    setWdStatus('前回のフォルダを使う許可が得られませんでした。フォルダを選び直してください。');
+                    pendingHandle = null;
+                    updateWorkdirUI();
+                }
+                const h = await window.showDirectoryPicker({ mode: 'readwrite', id: 'stereophonic-workdir' });
+                if (!(await hasPermission(h, true))) { setWdStatus('❌ 書き込みの許可が得られませんでした。'); return; }
+                workdirHandle = h;
+                try { await idbPut(IDB_KEY, h); } catch (e) { console.warn('保存先の記憶に失敗:', e); }
+                await refreshWorkdir();
+            } catch (e) {
+                if (e && e.name === 'AbortError') return;   // ユーザーがキャンセルしただけ
+                console.error(e);
+                setWdStatus('❌ フォルダを選べませんでした: ' + e.message);
+            }
+        }
+
+        async function clearWorkdir() {
+            workdirHandle = null; pendingHandle = null; workdirSongs = [];
+            try { await idbDel(IDB_KEY); } catch (e) {}
+            populateSelect();
+            updateWorkdirUI();
+            folderBtn.style.display = '';
+            setWdStatus('作業フォルダの設定を解除しました（フォルダの中身はそのままです）。');
+        }
+
+        // ===== 曲セレクタ =====================================================
+        function populateSelect() {
+            const prev = sel.value;
+            sel.innerHTML = '';
+            const ph = document.createElement('option');
+            ph.value = ''; ph.textContent = '— 選択 —';
+            sel.appendChild(ph);
+
+            if (workdirSongs.length) {
+                const g = document.createElement('optgroup');
+                g.label = '作業フォルダの曲';
+                workdirSongs.forEach((s, i) => {
+                    const o = document.createElement('option');
+                    o.value = 'wd:' + i;
+                    o.textContent = s.name + (s.stems.length ? `（${s.stems.length}パート）` : '（未分離）');
+                    g.appendChild(o);
+                });
+                sel.appendChild(g);
+            }
+            if (libSongs.length) {
+                const g = document.createElement('optgroup');
+                g.label = '公開ライブラリ';
+                libSongs.forEach(s => {
+                    const o = document.createElement('option');
+                    o.value = 'lib:' + s.id; o.textContent = s.name || s.id;
+                    g.appendChild(o);
+                });
+                sel.appendChild(g);
+            }
+            const empty = !workdirSongs.length && !libSongs.length;
+            sel.disabled = empty;
+            if (empty) {
+                ph.textContent = FS_OK
+                    ? '— まだ曲がありません（作業フォルダを選ぶか、曲を分離してください）—'
+                    : '— まだ曲がありません（曲を分離してください）—';
+            }
+            if (prev) sel.value = prev;
+        }
+
+        function clearStems() {
+            try { if (isPlaying) stopAllSources(); } catch (e) {}
+            try { stems.forEach(s => { if (s.nodes) disconnectStemNodes(s); }); } catch (e) {}
+            stems.length = 0;
+            selectedStemId = null;
+            pausedAt = 0;
+        }
+
+        async function loadWorkdirSong(song) {
+            panel.style.display = '';
+            panel.textContent = '読み込んでいます… ' + song.name;
+            try {
+                const entries = song.stems.length ? song.stems : (song.source ? [song.source] : []);
+                if (!entries.length) { panel.textContent = '⚠ この曲には音声ファイルがありません。'; return; }
+                const files = [];
+                for (const e of entries) files.push(await e.handle.getFile());
+                clearStems();
+                await addFilesAsStems(files);
+                panel.innerHTML = song.stems.length
+                    ? '✅ <b>' + escapeHtml(song.name) + '</b> を読み込みました（' + song.stems.length + 'パート）。「▶ 再生」→「立体音響」ONでお楽しみください。'
+                    : '✅ <b>' + escapeHtml(song.name) + '</b>（未分離）を読み込みました。分離するには下の「＋ 分離する曲を選ぶ」から同じ曲を選んでください。';
+            } catch (e) {
+                console.error(e);
+                panel.textContent = '❌ 読み込みに失敗しました: ' + e.message;
+            }
+        }
+
+        sel.addEventListener('change', async () => {
+            const v = sel.value;
+            if (!v) return;
+            if (v.startsWith('wd:')) await loadWorkdirSong(workdirSongs[+v.slice(3)]);
+            else if (v.startsWith('lib:')) await window.loadStemLibrary(v.slice(4));
         });
+
+        // ===== 分離完了後の保存 ================================================
+        // 作業フォルダがあれば自動保存、無ければダウンロードボタンを出す。
+        window.resetSavePanel = function () {
+            saveEl.style.display = 'none';
+            saveBtnsEl.innerHTML = '';
+            saveStatusEl.textContent = '';
+        };
+
+        async function writeWavFile(dirHandle, filename, buffer, onProgress) {
+            const fh = await dirHandle.getFileHandle(filename, { create: true });
+            const w = await fh.createWritable();
+            try {
+                const total = wavByteSize(buffer);
+                let done = 0;
+                for (const part of wavParts(buffer)) {
+                    await w.write(part);
+                    done += part.length;
+                    if (onProgress) onProgress(done / total);
+                }
+                await w.close();
+            } catch (e) {
+                try { await w.abort(); } catch (_) {}
+                throw e;
+            }
+        }
+
+        async function copySourceFile(dirHandle, file) {
+            const ext = (file.name.match(/\.[^.]+$/) || ['.bin'])[0].toLowerCase();
+            const fh = await dirHandle.getFileHandle('source' + ext, { create: true });
+            const w = await fh.createWritable();
+            try { await file.stream().pipeTo(w); }        // pipeTo が w を閉じる
+            catch (e) { try { await w.abort(); } catch (_) {} throw e; }
+        }
+
+        async function dirExists(parent, name) {
+            try { await parent.getDirectoryHandle(name); return true; }
+            catch (e) { return false; }
+        }
+
+        async function saveToWorkdir(list, srcFile) {
+            const base = sanitizeName(srcFile.name);
+            let dirName = base;
+            for (let i = 2; await dirExists(workdirHandle, dirName); i++) dirName = base + ' (' + i + ')';
+            const dir = await workdirHandle.getDirectoryHandle(dirName, { create: true });
+
+            const steps = list.length + 1;   // 分離結果 + 元の曲
+            let step = 0;
+            const report = (p) => {
+                saveStatusEl.textContent = `💾 「${dirName}」に保存しています… ${(((step + p) / steps) * 100).toFixed(0)}%`;
+            };
+            report(0);
+            await copySourceFile(dir, srcFile); step++;
+            for (const s of list) {
+                await writeWavFile(dir, s.name + '.wav', s.buffer, report);
+                step++;
+            }
+            return dirName;
+        }
+
+        function showDownloadButtons(list, baseName) {
+            saveBtnsEl.innerHTML = '';
+            list.forEach(s => {
+                const b = document.createElement('button');
+                b.className = 'btn save small';
+                b.textContent = `⬇ ${s.name}.wav`;
+                b.addEventListener('click', async () => {
+                    if (busySaving) return;
+                    busySaving = true;
+                    saveBtnsEl.querySelectorAll('button').forEach(x => x.disabled = true);
+                    const fname = `${baseName}_${s.name}.wav`;
+                    try {
+                        const parts = [];
+                        const total = wavByteSize(s.buffer);
+                        let done = 0;
+                        for (const part of wavParts(s.buffer)) {
+                            parts.push(new Blob([part]));
+                            done += part.length;
+                            saveStatusEl.textContent = `${fname} を書き出しています… ${(done / total * 100).toFixed(0)}%`;
+                            await new Promise(r => setTimeout(r, 0));   // UIを固めない
+                        }
+                        triggerDownload(new Blob(parts, { type: 'audio/wav' }), fname);
+                        // ブラウザ側でダウンロードが保留・ブロックされることがあるため「保存しました」と断定しない
+                        saveStatusEl.textContent = `✅ ${fname} を書き出しました。ブラウザのダウンロードフォルダをご確認ください（複数ファイルを続けて保存すると、ブラウザが許可を求めることがあります。その場合は「許可」を選んでください）。`;
+                    } catch (err) {
+                        console.error(err);
+                        saveStatusEl.textContent = `❌ 書き出しに失敗しました: ${err.message}`;
+                    } finally {
+                        busySaving = false;
+                        saveBtnsEl.querySelectorAll('button').forEach(x => x.disabled = false);
+                    }
+                });
+                saveBtnsEl.appendChild(b);
+            });
+        }
+
+        window.onSeparationDone = async function (list, srcFile) {
+            saveEl.style.display = '';
+            saveBtnsEl.innerHTML = '';
+            const baseName = sanitizeName(srcFile.name);
+
+            if (workdirHandle) {
+                saveNoteEl.innerHTML = '作業フォルダ <b>' + escapeHtml(workdirHandle.name) + '</b> に自動保存します（16bit / 44.1kHz のWAV）。';
+                try {
+                    const dirName = await saveToWorkdir(list, srcFile);
+                    saveStatusEl.innerHTML = '✅ <b>' + escapeHtml(workdirHandle.name) + ' / ' + escapeHtml(dirName) +
+                        '</b> に保存しました（元の曲＋' + list.length + 'パート）。次回このページを開いたら、上の「曲:」から選ぶだけで再生できます。';
+                    await refreshWorkdir(true);
+                    const idx = workdirSongs.findIndex(s => s.name === dirName);
+                    if (idx >= 0) sel.value = 'wd:' + idx;
+                } catch (e) {
+                    console.error(e);
+                    saveStatusEl.textContent = '❌ 作業フォルダへの保存に失敗しました: ' + e.message +
+                        '（下のボタンから手動でダウンロードできます）';
+                    showDownloadButtons(list, baseName);
+                }
+                return;
+            }
+
+            // 作業フォルダ未設定 → ダウンロードで保存してもらう
+            saveNoteEl.innerHTML = '分離結果は<b>このタブを閉じると消えます</b>（メモリ上にあるだけで、どこにも保存されていません）。' +
+                '下のボタンで<b>ご自身のPCに保存</b>してください（16bit / 44.1kHz のWAV。1分あたり約10MB）。' +
+                (FS_OK ? '<br>※上の「<b>📂 作業フォルダを選ぶ</b>」で保存先を決めておくと、次からは<b>分離後に自動保存</b>され、この操作は不要になります。' : '');
+            showDownloadButtons(list, baseName);
+            saveStatusEl.textContent = `保存できるもの: ${list.map(s => s.name + '.wav').join(' / ')}`;
+        };
+
+        // ===== フォールバック: フォルダから読み込む（webkitdirectory） =========
+        if (!('webkitdirectory' in document.createElement('input'))) {
+            folderBtn.style.display = 'none';   // iOS Safari など
+        } else {
+            folderBtn.addEventListener('click', () => folderInput.click());
+        }
+
+        function groupByFolder(files) {
+            const map = new Map();
+            for (const f of files) {
+                if (!AUDIO_RE.test(f.name)) continue;
+                const rel = f.webkitRelativePath || f.name;
+                const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+                if (!map.has(dir)) map.set(dir, []);
+                map.get(dir).push(f);
+            }
+            return Array.from(map.entries())
+                .map(([dir, fs]) => ({ dir, files: fs.sort((a, b) => a.name.localeCompare(b.name)) }))
+                .sort((a, b) => a.dir.localeCompare(b.dir));
+        }
+
+        async function loadFileGroup(group) {
+            panel.textContent = '読み込んでいます… ' + (group.dir || '選択したフォルダ');
+            clearStems();
+            sel.value = '';
+            await addFilesAsStems(group.files);
+            const label = group.dir ? group.dir.split('/').pop() : '選択したフォルダ';
+            panel.innerHTML = '✅ <b>' + escapeHtml(label) + '</b> を読み込みました（' +
+                group.files.length + 'パート）。「▶ 再生」→「立体音響」ONでお楽しみください。';
+        }
+
+        folderInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files || []);
+            e.target.value = '';
+            panel.style.display = '';
+            const groups = groupByFolder(files);
+            if (!groups.length) {
+                panel.innerHTML = '⚠ このフォルダには音声ファイル（wav / mp3 / flac / m4a など）が見つかりませんでした。';
+                return;
+            }
+            if (groups.length === 1) { await loadFileGroup(groups[0]); return; }
+            panel.innerHTML = '📁 ' + groups.length + '件の曲が見つかりました。再生したいものを選んでください：';
+            const listEl = document.createElement('div');
+            listEl.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;';
+            groups.forEach(g => {
+                const b = document.createElement('button');
+                b.className = 'btn small';
+                const label = g.dir ? g.dir.split('/').pop() : '（選択したフォルダ直下）';
+                b.textContent = label + '（' + g.files.length + 'パート）';
+                b.title = g.files.map(f => f.name).join(' / ');
+                b.addEventListener('click', () => loadFileGroup(g));
+                listEl.appendChild(b);
+            });
+            panel.appendChild(listEl);
+        });
+
+        // ===== 起動時 =========================================================
+        wdPickBtn.addEventListener('click', pickWorkdir);
+        wdRescanBtn.addEventListener('click', () => refreshWorkdir());
+        wdClearBtn.addEventListener('click', clearWorkdir);
+
+        (async function init() {
+            // 公開ライブラリ
+            try {
+                const lib = await getLibrary();
+                libSongs = (lib && lib.songs) || [];
+            } catch (e) { libSongs = []; }
+
+            // 前回の作業フォルダ（許可が残っていればそのまま使う）
+            if (FS_OK) {
+                try {
+                    const h = await idbGet(IDB_KEY);
+                    if (h) {
+                        if (await hasPermission(h, false)) {
+                            workdirHandle = h;
+                            await scanWorkdir();
+                            setWdStatus(workdirSongs.length
+                                ? `✅ 前回の作業フォルダ「${h.name}」から ${workdirSongs.length}曲を読み込みました。`
+                                : `✅ 作業フォルダ「${h.name}」を使います（まだ曲はありません）。`);
+                        } else {
+                            pendingHandle = h;
+                            setWdStatus(`前回の作業フォルダ「${h.name}」があります。ブラウザの仕様で、開き直すたびに一度だけ許可が必要です。上のボタンを押してください。`);
+                        }
+                    }
+                } catch (e) { console.warn('作業フォルダの復元に失敗:', e); }
+            }
+
+            populateSelect();
+            updateWorkdirUI();
+
+            const cur = new URLSearchParams(location.search).get('song');
+            if (cur) sel.value = 'lib:' + cur;
+        })();
+    })();
+
+    // ?song=<id> があれば自動読み込み
+    (function autoLoad() {
+        const song = new URLSearchParams(location.search).get('song');
+        if (song) window.loadStemLibrary(song);
+    })();
+</script>
+
+<!-- ▼ ブラウザ内音源分離（Demucs / ONNX Runtime Web）— コードはMIT: vendor/demucs-web/ -->
+<script type="module">
+    // 重い分離処理は separator-worker.js（Web Worker）側で実行する。
+    // これによりUIスレッドが空くので「ページが応答しません」が出ず、スピナー等も滑らかに動く。
+    const SAMPLE_RATE = 44100;
+    const $ = (id) => document.getElementById(id);
+    const backendEl = $('sepBackend');
+    const pickBtn = $('sepPickBtn');
+    const fileInput = $('sepFileInput');
+    const fnameEl = $('sepFileName');
+    const progWrap = $('sepProgressWrap');
+    const bar = $('sepBar');
+    const statusEl = $('sepStatus');
+
+    const spinnerEl = $('sepSpinner');
+    const elapsedEl = $('sepElapsed');
+    let sepCtx = null, busy = false;
+    let elapsedTimer = null, startedAt = 0;
+
+    const setStatus = (m) => { statusEl.textContent = m; };
+    const setBar = (p) => { bar.classList.remove('indet'); bar.style.width = Math.max(0, Math.min(100, p)) + '%'; };
+    const setBarIndet = () => { bar.style.width = '40%'; bar.classList.add('indet'); };
+
+    const fmtMMSS = (s) => Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    function startElapsed() {
+        startedAt = Date.now();
+        elapsedEl.textContent = '経過時間 0:00';
+        stopElapsed();
+        elapsedTimer = setInterval(() => {
+            elapsedEl.textContent = '経過時間 ' + fmtMMSS(Math.floor((Date.now() - startedAt) / 1000));
+        }, 1000);
+    }
+    function stopElapsed() { if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; } }
+
+    // 分離中にタブを閉じる/リロード/戻る際の警告
+    function warnBeforeUnload(e) { e.preventDefault(); e.returnValue = ''; return ''; }
+    function armUnloadGuard() { window.addEventListener('beforeunload', warnBeforeUnload); }
+    function disarmUnloadGuard() { window.removeEventListener('beforeunload', warnBeforeUnload); }
+
+    const gpuCheckbox = $('sepUseGpu');
+    let gpuAvailable = false;
+
+    // 実際に使うバックエンド：GPUは「対応あり かつ チェックON」のときだけ。既定は安定重視のCPU(WASM)。
+    function desiredBackend() { return (gpuAvailable && gpuCheckbox.checked) ? 'webgpu' : 'wasm'; }
+
+    function updateBadge() {
+        const d = desiredBackend();
+        backendEl.classList.remove('gpu', 'cpu');
+        if (d === 'webgpu') {
+            backendEl.textContent = '⚡ WebGPU（高速・実験的）';
+            backendEl.classList.add('gpu');
+        } else {
+            backendEl.textContent = gpuAvailable
+                ? 'CPU方式（安定・既定）※上のチェックでGPU高速化も試せます'
+                : `CPU方式（安定・この端末のGPU高速化は非対応）`;
+            backendEl.classList.add('cpu');
+        }
+    }
+
+    function wasmThreads() { return self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1; }
+
+    async function detectBackend() {
+        if ('gpu' in navigator) {
+            try { gpuAvailable = !!(await navigator.gpu.requestAdapter()); } catch (e) { gpuAvailable = false; }
+        }
+        if (!gpuAvailable) {
+            gpuCheckbox.disabled = true;
+            $('sepGpuLabel').classList.add('disabled');
+        }
+        gpuCheckbox.addEventListener('change', updateBadge);
+        updateBadge();
+
+        const dm = navigator.deviceMemory;
+        if (dm && dm <= 4) {
+            const note = document.querySelector('#sepCard .sep-note');
+            if (note) note.insertAdjacentHTML('beforeend',
+                `<br><span style="color:#ff8a8a">⚠ この端末はメモリが少なめ（約${dm}GB）です。この端末では<b>5分以内の曲</b>までとし、他タブを閉じてお試しください。</span>`);
+        }
+    }
+
+    // === 分離用 Web Worker（重い処理をUIスレッド外で実行） ===
+    let worker = null;
+    function getWorker() {
+        if (!worker) worker = new Worker('separator-worker.js', { type: 'module' });
+        return worker;
+    }
+
+    // プレイヤーに並べるときの表示順（分離モデルの出力順とは別）
+    const DISPLAY_ORDER = ['vocals', 'drums', 'bass', 'other'];
+
+    // 1曲を Worker で分離。進捗はステータス/バーへ反映。
+    // 【改変 2026-08-17】Worker が「確定した部分」を順に送ってくるので、受け取り次第
+    // 出力先の AudioBuffer へ直接書き込む。曲全体ぶんの中間配列を持たないため、
+    // 従来ここで発生していた二重確保（4分の曲で約340MB×2）が無くなる。
+    // 成功すると [{name, buffer:AudioBuffer}, ...] を返す。
+    function separateWithWorker(left, right, sampleRate, useGpu) {
+        return new Promise((resolve, reject) => {
+            const w = getWorker();
+            let buffers = null;    // { トラック名: AudioBuffer }
+            let names = [];
+
+            const finish = (fn) => { w.removeEventListener('message', onMsg); fn(); };
+
+            const onMsg = (ev) => {
+                const m = ev.data || {};
+                try {
+                    if (m.type === 'download') {
+                        setBar(m.total ? m.loaded / m.total * 100 : 0);
+                        setStatus(`①分離モデルを準備中（初回だけ・以後は不要）… ${(m.loaded / 1048576).toFixed(0)} / ${(m.total / 1048576).toFixed(0)} MB`);
+                    } else if (m.type === 'phase') {
+                        if (m.phase === 'loadmodel') { setStatus('①分離モデルを準備中（初回だけ約172MB・数分かかることがあります）…'); setBarIndet(); }
+                        else if (m.phase === 'cachehit') { setStatus('①分離モデルを端末内のキャッシュから読み込み中（ダウンロード不要）…'); setBarIndet(); }
+                        else if (m.phase === 'resample') { setStatus('🎵 音声を変換しています…'); setBarIndet(); }
+                        else if (m.phase === 'separate') { setStatus('②AIが分離を計算中…（曲の長さと端末性能により数十秒〜数分。このままお待ちください）'); setBarIndet(); }
+                    } else if (m.type === 'meta') {
+                        // 出力先を先に用意する（ここから先はチャンクを直接書き込むだけ）
+                        const ctx = (window.getAudioCtxForStems ? window.getAudioCtxForStems() : sepCtx);
+                        names = DISPLAY_ORDER.filter(n => m.tracks.indexOf(n) >= 0);
+                        buffers = {};
+                        for (const n of names) buffers[n] = ctx.createBuffer(2, m.totalSamples, m.sampleRate);
+                    } else if (m.type === 'chunk') {
+                        if (!buffers) throw new Error('内部エラー: 出力先が未初期化です');
+                        for (const n of Object.keys(m.tracks)) {
+                            const b = buffers[n];
+                            if (!b) continue;
+                            const tr = m.tracks[n];
+                            if (b.copyToChannel) {
+                                b.copyToChannel(tr.left, 0, m.offset);
+                                b.copyToChannel(tr.right, 1, m.offset);
+                            } else {
+                                b.getChannelData(0).set(tr.left, m.offset);
+                                b.getChannelData(1).set(tr.right, m.offset);
+                            }
+                        }
+                    } else if (m.type === 'progress') {
+                        setBar(m.progress * 100);
+                        setStatus(`②AIが分離を計算中… ${(m.progress * 100).toFixed(0)}%  （パート ${m.currentSegment}/${m.totalSegments}）`);
+                    } else if (m.type === 'done') {
+                        if (!buffers) { finish(() => reject(new Error('分離結果を受け取れませんでした'))); return; }
+                        const list = names.map(n => ({ name: n, buffer: buffers[n] }));
+                        finish(() => resolve(list));
+                    } else if (m.type === 'error') {
+                        finish(() => reject(Object.assign(new Error(m.message), { usedGpu: m.usedGpu })));
+                    }
+                } catch (err) {
+                    finish(() => reject(err));
+                }
+            };
+            w.addEventListener('message', onMsg);
+            // L/R は Worker へ「転送」して所有権を渡す（コピーを作らず省メモリ）
+            w.postMessage(
+                { type: 'separate', left, right, sampleRate, useGpu, threads: wasmThreads() },
+                [left.buffer, right.buffer]
+            );
+        });
+    }
+
+    async function run(file) {
+        if (busy) return;
+        busy = true;
+        pickBtn.disabled = true;
+        pickBtn.textContent = '分離中…（お待ちください）';
+        progWrap.style.display = 'block';
+        spinnerEl.style.display = 'block';
+        document.getElementById('sepWarn').style.display = '';
+        fnameEl.textContent = file.name;
+        if (window.resetSavePanel) window.resetSavePanel();   // 前回の保存表示を片付ける
+        startElapsed();
+        armUnloadGuard();
+        // 進捗が確実に見えるよう、分離パネルまでスクロール
+        try { document.getElementById('sepCard').scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {}
+        const t0 = Date.now();
+        try {
+            if (!sepCtx) sepCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+            setStatus('🎵 音声ファイルを読み込んでいます…'); setBarIndet();
+            let buf;
+            try {
+                buf = await sepCtx.decodeAudioData(await file.arrayBuffer());
+            } catch (e) {
+                // 音声として読めないファイル（テキスト等）を選んだ場合。
+                // メモリ不足と紛らわしいので、専用の案内にする
+                throw Object.assign(
+                    new Error('この音声ファイルを読み込めませんでした。対応していない形式か、ファイルが壊れている可能性があります（mp3 / wav / m4a / flac などをお試しください）。'),
+                    { userFacing: true });
+            }
+
+            const durMin = buf.duration / 60;
+            // sepCtx は 44100Hz 指定で作っているので通常は 44100 だが、指定が効かない
+            // ブラウザもあるため実際の値を控えておく（Worker側でリサンプルされる）
+            const srcRate = buf.sampleRate;
+            const lowMem = (navigator.deviceMemory && navigator.deviceMemory <= 4);
+            // 【2026-08-17】分離処理そのものは曲の長さに関係なく一定メモリで動くようになったため、
+            // 上限を緩和した（従来 3分 / 6分）。残る制約は再生用 AudioBuffer（4パート×ステレオ＝
+            // 1分あたり約85MB）で、これは3D再生する以上どうしても必要になる。
+            const cap = lowMem ? 5 : 10;
+            if (durMin > cap) {
+                throw Object.assign(
+                    new Error(`曲が長い（約${durMin.toFixed(1)}分）ため、この端末ではメモリ不足でブラウザが強制終了する恐れがあります。${cap}分以内の曲でお試しください。長い曲を分離したい場合は、下の案内のとおりPC上のColabで分離し結果を再生する方法が確実です。`),
+                    { userFacing: true });
+            }
+            if (durMin > 4) {
+                setStatus(`⚠ 約${durMin.toFixed(1)}分の曲です。メモリに余裕が無いと落ちることがあります（落ちたら他タブを閉じ、より短い曲で）。続行します…`);
+            }
+
+            // チャンネルデータを独立 Float32Array にコピー（Workerへ転送するため）
+            const L = new Float32Array(buf.getChannelData(0));
+            const R = new Float32Array(buf.numberOfChannels > 1 ? buf.getChannelData(1) : buf.getChannelData(0));
+            buf = null;   // 元の音声（1分あたり約21MB）はもう不要なので解放させる
+
+            const useGpu = (gpuAvailable && gpuCheckbox.checked);
+            let list;
+            try {
+                list = await separateWithWorker(L, R, srcRate, useGpu);
+            } catch (err) {
+                if (err && err.usedGpu) {
+                    // GPUで失敗 → Workerを作り直して CPU(WASM) 方式でやり直し（L/Rは転送済みのため再デコード）
+                    console.warn('GPU separation failed, retry with CPU:', err);
+                    setStatus('GPUで問題が発生したため、CPU方式で最初からやり直します…');
+                    setBarIndet();
+                    if (worker) { worker.terminate(); worker = null; }
+                    let buf2 = await sepCtx.decodeAudioData(await file.arrayBuffer());
+                    const rate2 = buf2.sampleRate;
+                    const L2 = new Float32Array(buf2.getChannelData(0));
+                    const R2 = new Float32Array(buf2.numberOfChannels > 1 ? buf2.getChannelData(1) : buf2.getChannelData(0));
+                    buf2 = null;
+                    list = await separateWithWorker(L2, R2, rate2, false);
+                } else {
+                    throw err;
+                }
+            }
+
+            if (!window.addStemsFromAudioBuffers) throw new Error('プレイヤー取り込みAPIが見つかりません');
+            window.addStemsFromAudioBuffers(list);
+
+            const secs = ((Date.now() - t0) / 1000).toFixed(0);
+            setBar(100);
+            elapsedEl.textContent = '所要時間 ' + fmtMMSS(+secs);
+            document.getElementById('sepWarn').style.display = 'none';
+            setStatus(`✅ 分離完了（${fmtMMSS(+secs)}）。下のプレイヤーに ${list.length} パート（vocals / drums / bass / other）を追加しました。「▶ 再生」を押し、「立体音響」をONにしてみてください。`);
+            // 保存（作業フォルダが設定されていれば自動保存、無ければダウンロード案内）
+            if (window.onSeparationDone) {
+                try { await window.onSeparationDone(list, file); } catch (err) { console.error(err); }
+            }
+        } catch (e) {
+            console.error(e);
+            bar.classList.remove('indet'); bar.style.width = '0%';
+            // 原因がはっきりしているエラー（形式が読めない・曲が長すぎる）は、そのまま案内する。
+            // 原因不明のときだけメモリ不足の可能性に触れる
+            const msg = (e && e.message) ? e.message : String(e);
+            setStatus(e && e.userFacing
+                ? '❌ ' + msg
+                : '❌ 分離に失敗しました: ' + msg + '\n（この端末・ブラウザ、または非常に長い曲でメモリ不足の可能性。短い曲／Chrome・Edgeでお試しください。このメッセージ全文を教えていただければ調べます）');
+        } finally {
+            stopElapsed();
+            disarmUnloadGuard();
+            spinnerEl.style.display = 'none';
+            busy = false;
+            pickBtn.disabled = false;
+            pickBtn.textContent = '＋ 分離する曲を選ぶ';
+            fileInput.value = '';
+        }
+    }
+
+    pickBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => { const f = e.target.files[0]; if (f) run(f); });
+    detectBackend();
 </script>
 </body>
 </html>
