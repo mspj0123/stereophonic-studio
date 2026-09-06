@@ -31,6 +31,15 @@
         .sep-warn { font-size:12px; color:#ffcb47; margin-top:10px; line-height:1.6;
             background:rgba(255,203,71,.08); border:1px solid rgba(255,203,71,.25);
             border-radius:8px; padding:9px 12px; }
+        /* 分離結果の保存パネル（2026-09-06 追加） */
+        .sep-save { margin-top:14px; padding:12px 14px; border-radius:8px;
+            background:rgba(0,200,83,.07); border:1px solid rgba(0,200,83,.3); }
+        .sep-save-title { font-size:14px; font-weight:bold; color:#5ce68a; margin-bottom:6px; }
+        .sep-save .sep-note { margin:0 0 10px; }
+        .sep-save-btns { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+        .sep-save-status { font-size:12px; color:#9a9ac8; margin-top:9px; min-height:1.4em; line-height:1.6; }
+        .btn.save { background:linear-gradient(135deg,#1f8f52,#166b3d); }
+        .btn.save:hover:not(:disabled) { background:linear-gradient(135deg,#25a862,#1b7d47); }
         * { box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', sans-serif;
@@ -544,6 +553,19 @@
             </div>
         </h1>
 
+        <!-- 作業フォルダ（分離した音源の保存先）2026-09-06 追加 -->
+        <div class="card" id="workdirCard">
+            <div class="card-title">📂 作業フォルダ（分離した音源の保存先）</div>
+            <p class="sep-note" id="wdNote">最初に<b>保存先のフォルダ</b>を選んでおくと、分離が終わるたびに<b>曲ごとのフォルダが作られ、そこへ自動で保存</b>されます（元の曲もコピーされます）。次回このページを開くと、そのフォルダの中の曲が上の「曲:」に一覧表示され、<b>分離し直さずにすぐ再生</b>できます。<br>※フォルダの中身が外部に送られることはありません。すべてお使いのPCの中だけで完結します。</p>
+            <div class="player-row">
+                <button class="btn" id="wdPickBtn">📂 作業フォルダを選ぶ</button>
+                <button class="btn small" id="wdRescanBtn" style="display:none">🔄 一覧を更新</button>
+                <button class="btn small" id="wdClearBtn" style="display:none">解除</button>
+                <span class="sep-fname" id="wdName"></span>
+            </div>
+            <div class="sep-save-status" id="wdStatus"></div>
+        </div>
+
         <!-- 音源分離（ブラウザ内AI） -->
         <div class="card" id="sepCard">
             <div class="card-title">🎤 音源を分離（ブラウザ内AI・アップロード不要）</div>
@@ -565,6 +587,13 @@
                     </div>
                 </div>
                 <div class="sep-warn" id="sepWarn">⚠ 分離が終わるまで、このタブを<b>閉じたり・リロード・「戻る」</b>をしないでください（分離が中断され、最初からやり直しになります）。</div>
+            </div>
+            <!-- 分離結果の保存（2026-09-06 追加） -->
+            <div class="sep-save" id="sepSave" style="display:none">
+                <div class="sep-save-title" id="sepSaveTitle">💾 分離した音源の保存</div>
+                <p class="sep-note" id="sepSaveNote"></p>
+                <div class="sep-save-btns" id="sepSaveBtns"></div>
+                <div class="sep-save-status" id="sepSaveStatus"></div>
             </div>
         </div>
 
@@ -856,6 +885,13 @@
     el.addBtn.onclick = () => el.fileInput.click();
     el.fileInput.onchange = async (e) => {
         const files = Array.from(e.target.files || []);
+        e.target.value = '';
+        await addFilesAsStems(files);
+    };
+
+    // 複数の音声ファイルをステムとして取り込む。
+    // 「＋ 音源ファイルを追加」と「📁 フォルダから読み込む」の共通処理。
+    async function addFilesAsStems(files) {
         if (!files.length) return;
         ensureCtx();
 
@@ -904,19 +940,25 @@
         updateSelectedInfo();
         el.playBtn.disabled = stems.length === 0;
 
-        e.target.value = '';
         if (wasPlaying) playAll(pausedAt);
-    };
+    }
 
     // ===== ブラウザ内分離モジュール(下部の module script)向けの取り込みAPI =====
     // プレイヤーの AudioContext を貸し出す（分離結果を同じ ctx の AudioBuffer にするため）
     window.getAudioCtxForStems = function () { ensureCtx(); return audioCtx; };
 
-    // 分離済みステム [{name, buffer(AudioBuffer)}...] をプレイヤーに追加（既存のファイル追加と同じ流儀）
+    // 分離済みステム [{name, buffer(AudioBuffer)}...] をプレイヤーに読み込む。
+    // 【2026-09-06】分離は「1曲まるごと」の結果なので、前に読み込んでいた曲は置き換える。
+    // 追記にすると、リストから曲を選んだあとに別の曲を分離したとき、
+    // 2曲ぶんのトラックが混ざって同時に鳴ってしまうため。
     window.addStemsFromAudioBuffers = function (list) {
         ensureCtx();
-        const wasPlaying = isPlaying;
-        if (wasPlaying) { pausedAt = currentPos(); stopAllSources(); }
+        if (isPlaying) stopAllSources();
+        try { stems.forEach(s => { if (s.nodes) disconnectStemNodes(s); }); } catch (e) {}
+        stems.length = 0;
+        selectedStemId = null;
+        pausedAt = 0;
+        const wasPlaying = false;
         for (const item of list) {
             const name = item.name;
             const pos = getInitialPosition(name, stems.length);
@@ -1482,31 +1524,557 @@
     };
 
     // 上部に「← ライブラリ」リンクと曲切り替えセレクタを差し込む
-    (function insertLibraryBar() {
+    // ============================================================================
+    // 曲リスト・作業フォルダ・分離結果の保存（2026-09-06 追加）
+    //
+    // 【方針】分離結果はメモリ上にしか無く、タブを閉じると消えてしまう。そこで
+    //   ・あらかじめ「作業フォルダ」を選んでおく
+    //   ・分離が終わったら <作業フォルダ>/<曲名>/ を作り、元の曲と分離結果を自動保存
+    //   ・次回はそのフォルダを読み、上の「曲:」から分離せずに再生できる
+    // という往復にする。File System Access API を使うため、保存も読み込みも
+    // すべて利用者のPCの中だけで完結する（サーバーへは何も送らない）。
+    //
+    // 非対応ブラウザ（Firefox / Safari 等）では、従来どおり
+    //   ・保存 = ファイルのダウンロード
+    //   ・読み込み = 「📁 フォルダから読み込む」（webkitdirectory）
+    // にフォールバックする。
+    // ============================================================================
+    (function librarySection() {
         const container = document.querySelector('.container');
         if (!container) return;
+
+        const FS_OK = (typeof window.showDirectoryPicker === 'function') && window.isSecureContext;
+        const AUDIO_RE = /\.(wav|mp3|flac|m4a|aac|ogg|opus|webm)$/i;
+        const SOURCE_RE = /^source\./i;          // 元の曲のコピー。パートとしては読み込まない
+        const EXPORT_CHUNK_FRAMES = 1 << 18;     // 262,144フレーム ≒ 6秒 ≒ 約1MB(16bit stereo)
+        const IDB_NAME = 'stereophonic-fs', IDB_STORE = 'handles', IDB_KEY = 'workdir';
+
+        // ---- 上部バー（← ライブラリ / 曲セレクタ / フォルダ読み込み） ----
         const bar = document.createElement('div');
-        bar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap;';
+        bar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:6px;flex-wrap:wrap;';
         bar.innerHTML =
             '<a href="index.html" style="font-size:12px;color:#00f2ff;text-decoration:none;border:1px solid rgba(0,242,255,0.3);padding:7px 12px;border-radius:8px;">← ライブラリ</a>' +
-            '<label style="font-size:11px;color:#8888aa;letter-spacing:1px;">曲:</label>' +
+            '<label for="libSelect" style="font-size:11px;color:#8888aa;letter-spacing:1px;">曲:</label>' +
             '<select id="libSelect" style="flex:1;min-width:160px;background:#14142b;color:#e0e0ff;' +
             'border:1px solid rgba(0,242,255,0.3);border-radius:8px;padding:8px 10px;font-size:13px;">' +
-            '<option value="">— 選択 —</option></select>';
+            '<option value="">— 選択 —</option></select>' +
+            '<button class="btn small" id="folderPickBtn" title="分離済みの音源が入ったフォルダを選びます">📁 フォルダから読み込む</button>' +
+            '<input type="file" id="folderInput" webkitdirectory directory multiple style="display:none">';
         container.insertBefore(bar, container.firstChild);
 
-        const sel = bar.querySelector('#libSelect');
-        getLibrary().then(lib => {
-            (lib.songs || []).forEach(s => {
-                const o = document.createElement('option');
-                o.value = s.id; o.textContent = s.name || s.id;
-                sel.appendChild(o);
-            });
-            const cur = new URLSearchParams(location.search).get('song');
-            if (cur) sel.value = cur;
-        }).catch(() => {});
+        const panel = document.createElement('div');
+        panel.id = 'folderPanel';
+        panel.style.cssText = 'margin-bottom:14px;font-size:12px;color:#9a9ac8;line-height:1.7;display:none;';
+        container.insertBefore(panel, bar.nextSibling);
 
-        sel.addEventListener('change', () => { if (sel.value) window.loadStemLibrary(sel.value); });
+        const sel = bar.querySelector('#libSelect');
+        const folderBtn = bar.querySelector('#folderPickBtn');
+        const folderInput = bar.querySelector('#folderInput');
+        const wdPickBtn = document.getElementById('wdPickBtn');
+        const wdRescanBtn = document.getElementById('wdRescanBtn');
+        const wdClearBtn = document.getElementById('wdClearBtn');
+        const wdNameEl = document.getElementById('wdName');
+        const wdStatusEl = document.getElementById('wdStatus');
+        const wdNoteEl = document.getElementById('wdNote');
+        const saveEl = document.getElementById('sepSave');
+        const saveNoteEl = document.getElementById('sepSaveNote');
+        const saveBtnsEl = document.getElementById('sepSaveBtns');
+        const saveStatusEl = document.getElementById('sepSaveStatus');
+
+        let libSongs = [];        // 公開ライブラリ（library.json）
+        let workdirSongs = [];    // 作業フォルダの中で見つかった曲
+        let workdirHandle = null;
+        let pendingHandle = null; // 前回の作業フォルダ。使うには許可のクリックが要る
+        let busySaving = false;
+
+        const escapeHtml = (t) => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        const setWdStatus = (t) => { wdStatusEl.textContent = t; };
+
+        function sanitizeName(name) {
+            return (name || 'song')
+                .replace(/\.[^.]+$/, '')                       // 拡張子を落とす
+                .replace(/[\\\/:*?"<>|\x00-\x1f]/g, '_')       // フォルダ名に使えない文字
+                .replace(/\s+/g, ' ').trim().slice(0, 60) || 'song';
+        }
+
+        // ===== WAV(16bit PCM) 書き出し =========================================
+        // 【メモリ方針】曲全体ぶんの巨大な配列は作らない。約1MBずつ切り出して
+        // 書き込み、そのつど捨てる。2026-08-17 のメモリ最適化を無駄にしないため。
+        function wavHeader(frames, sampleRate, channels) {
+            const dataSize = frames * channels * 2;
+            const v = new DataView(new ArrayBuffer(44));
+            const ascii = (off, str) => { for (let i = 0; i < str.length; i++) v.setUint8(off + i, str.charCodeAt(i)); };
+            ascii(0, 'RIFF'); v.setUint32(4, 36 + dataSize, true); ascii(8, 'WAVE');
+            ascii(12, 'fmt '); v.setUint32(16, 16, true);
+            v.setUint16(20, 1, true);                    // PCM
+            v.setUint16(22, channels, true);
+            v.setUint32(24, sampleRate, true);
+            v.setUint32(28, sampleRate * channels * 2, true);
+            v.setUint16(32, channels * 2, true);
+            v.setUint16(34, 16, true);                   // 16bit
+            ascii(36, 'data'); v.setUint32(40, dataSize, true);
+            return new Uint8Array(v.buffer);
+        }
+
+        // WAVを先頭から順に細切れで生成する。Int16Array のバイト列はリトルエンディアン
+        // 前提（現行の実用ブラウザはすべてLE）。
+        function* wavParts(buffer) {
+            const ch = Math.min(2, buffer.numberOfChannels);
+            const frames = buffer.length;
+            const L = buffer.getChannelData(0);
+            const R = ch > 1 ? buffer.getChannelData(1) : L;
+            yield wavHeader(frames, buffer.sampleRate, ch);
+            for (let off = 0; off < frames; off += EXPORT_CHUNK_FRAMES) {
+                const n = Math.min(EXPORT_CHUNK_FRAMES, frames - off);
+                const pcm = new Int16Array(n * ch);
+                for (let i = 0; i < n; i++) {
+                    let l = L[off + i]; l = l < -1 ? -1 : (l > 1 ? 1 : l);
+                    pcm[i * ch] = l < 0 ? l * 0x8000 : l * 0x7FFF;
+                    if (ch > 1) {
+                        let r = R[off + i]; r = r < -1 ? -1 : (r > 1 ? 1 : r);
+                        pcm[i * ch + 1] = r < 0 ? r * 0x8000 : r * 0x7FFF;
+                    }
+                }
+                yield new Uint8Array(pcm.buffer);
+            }
+        }
+        const wavByteSize = (buffer) => 44 + buffer.length * Math.min(2, buffer.numberOfChannels) * 2;
+
+        function triggerDownload(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 60000);   // 保存開始前に無効化しないよう猶予を置く
+        }
+
+        // ===== 作業フォルダ（File System Access API） ==========================
+        function idbOpen() {
+            return new Promise((res, rej) => {
+                const r = indexedDB.open(IDB_NAME, 1);
+                r.onupgradeneeded = () => r.result.createObjectStore(IDB_STORE);
+                r.onsuccess = () => res(r.result);
+                r.onerror = () => rej(r.error);
+            });
+        }
+        async function idbGet(key) {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const q = db.transaction(IDB_STORE).objectStore(IDB_STORE).get(key);
+                q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+            });
+        }
+        async function idbPut(key, val) {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const q = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).put(val, key);
+                q.onsuccess = () => res(); q.onerror = () => rej(q.error);
+            });
+        }
+        async function idbDel(key) {
+            const db = await idbOpen();
+            return new Promise((res, rej) => {
+                const q = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).delete(key);
+                q.onsuccess = () => res(); q.onerror = () => rej(q.error);
+            });
+        }
+
+        async function hasPermission(handle, request) {
+            const opts = { mode: 'readwrite' };
+            try {
+                if ((await handle.queryPermission(opts)) === 'granted') return true;
+                if (!request) return false;
+                return (await handle.requestPermission(opts)) === 'granted';
+            } catch (e) { return false; }
+        }
+
+        // 作業フォルダの中を見て、曲（＝サブフォルダ）の一覧を作る
+        async function scanWorkdir() {
+            workdirSongs = [];
+            if (!workdirHandle) return;
+            for await (const [name, h] of workdirHandle.entries()) {
+                if (h.kind !== 'directory') continue;
+                const stems = [], sources = [];
+                for await (const [fn, fh] of h.entries()) {
+                    if (fh.kind !== 'file' || !AUDIO_RE.test(fn)) continue;
+                    (SOURCE_RE.test(fn) ? sources : stems).push({ name: fn, handle: fh });
+                }
+                if (stems.length || sources.length) {
+                    stems.sort((a, b) => a.name.localeCompare(b.name));
+                    workdirSongs.push({ name, stems, source: sources[0] || null });
+                }
+            }
+            workdirSongs.sort((a, b) => a.name.localeCompare(b.name));
+        }
+
+        function updateWorkdirUI() {
+            if (!FS_OK) {
+                wdNoteEl.innerHTML = 'このブラウザは作業フォルダへの直接保存に対応していません（<b>PCのChrome / Edge</b> で使えます）。' +
+                    'このブラウザでは、分離後に表示される<b>ダウンロードボタン</b>で保存し、' +
+                    '再生するときは上の「<b>📁 フォルダから読み込む</b>」で保存先フォルダを選んでください。';
+                wdPickBtn.style.display = 'none';
+                return;
+            }
+            if (workdirHandle) {
+                wdNameEl.textContent = '現在の保存先: ' + workdirHandle.name;
+                wdPickBtn.textContent = '📂 別のフォルダに変更';
+                wdRescanBtn.style.display = '';
+                wdClearBtn.style.display = '';
+                folderBtn.style.display = 'none';   // 作業フォルダがあれば従来のフォルダ読み込みは不要
+            } else if (pendingHandle) {
+                wdNameEl.textContent = '前回の保存先: ' + pendingHandle.name;
+                wdPickBtn.textContent = '📂 前回のフォルダを使う（' + pendingHandle.name + '）';
+                wdRescanBtn.style.display = 'none';
+                wdClearBtn.style.display = '';
+            } else {
+                wdNameEl.textContent = '';
+                wdPickBtn.textContent = '📂 作業フォルダを選ぶ';
+                wdRescanBtn.style.display = 'none';
+                wdClearBtn.style.display = 'none';
+            }
+        }
+
+        async function refreshWorkdir(quiet) {
+            try {
+                if (!quiet) setWdStatus('フォルダを読み込んでいます…');
+                await scanWorkdir();
+                populateSelect();
+                setWdStatus(workdirSongs.length
+                    ? `✅ ${workdirSongs.length}曲が見つかりました。上の「曲:」から選んで再生できます。`
+                    : 'このフォルダにはまだ曲がありません。下で曲を分離すると、ここに保存されます。');
+            } catch (e) {
+                console.error(e);
+                setWdStatus('❌ フォルダを読み込めませんでした: ' + e.message);
+            }
+            updateWorkdirUI();
+        }
+
+        async function pickWorkdir() {
+            try {
+                // 前回のフォルダが残っていれば、選び直さずに許可だけ取る
+                if (pendingHandle) {
+                    if (await hasPermission(pendingHandle, true)) {
+                        workdirHandle = pendingHandle; pendingHandle = null;
+                        await refreshWorkdir();
+                        return;
+                    }
+                    setWdStatus('前回のフォルダを使う許可が得られませんでした。フォルダを選び直してください。');
+                    pendingHandle = null;
+                    updateWorkdirUI();
+                }
+                const h = await window.showDirectoryPicker({ mode: 'readwrite', id: 'stereophonic-workdir' });
+                if (!(await hasPermission(h, true))) { setWdStatus('❌ 書き込みの許可が得られませんでした。'); return; }
+                workdirHandle = h;
+                try { await idbPut(IDB_KEY, h); } catch (e) { console.warn('保存先の記憶に失敗:', e); }
+                await refreshWorkdir();
+            } catch (e) {
+                if (e && e.name === 'AbortError') return;   // ユーザーがキャンセルしただけ
+                console.error(e);
+                setWdStatus('❌ フォルダを選べませんでした: ' + e.message);
+            }
+        }
+
+        async function clearWorkdir() {
+            workdirHandle = null; pendingHandle = null; workdirSongs = [];
+            try { await idbDel(IDB_KEY); } catch (e) {}
+            populateSelect();
+            updateWorkdirUI();
+            folderBtn.style.display = '';
+            setWdStatus('作業フォルダの設定を解除しました（フォルダの中身はそのままです）。');
+        }
+
+        // ===== 曲セレクタ =====================================================
+        function populateSelect() {
+            const prev = sel.value;
+            sel.innerHTML = '';
+            const ph = document.createElement('option');
+            ph.value = ''; ph.textContent = '— 選択 —';
+            sel.appendChild(ph);
+
+            if (workdirSongs.length) {
+                const g = document.createElement('optgroup');
+                g.label = '作業フォルダの曲';
+                workdirSongs.forEach((s, i) => {
+                    const o = document.createElement('option');
+                    o.value = 'wd:' + i;
+                    o.textContent = s.name + (s.stems.length ? `（${s.stems.length}パート）` : '（未分離）');
+                    g.appendChild(o);
+                });
+                sel.appendChild(g);
+            }
+            if (libSongs.length) {
+                const g = document.createElement('optgroup');
+                g.label = '公開ライブラリ';
+                libSongs.forEach(s => {
+                    const o = document.createElement('option');
+                    o.value = 'lib:' + s.id; o.textContent = s.name || s.id;
+                    g.appendChild(o);
+                });
+                sel.appendChild(g);
+            }
+            const empty = !workdirSongs.length && !libSongs.length;
+            sel.disabled = empty;
+            if (empty) {
+                ph.textContent = FS_OK
+                    ? '— まだ曲がありません（作業フォルダを選ぶか、曲を分離してください）—'
+                    : '— まだ曲がありません（曲を分離してください）—';
+            }
+            if (prev) sel.value = prev;
+        }
+
+        function clearStems() {
+            try { if (isPlaying) stopAllSources(); } catch (e) {}
+            try { stems.forEach(s => { if (s.nodes) disconnectStemNodes(s); }); } catch (e) {}
+            stems.length = 0;
+            selectedStemId = null;
+            pausedAt = 0;
+        }
+
+        async function loadWorkdirSong(song) {
+            panel.style.display = '';
+            panel.textContent = '読み込んでいます… ' + song.name;
+            try {
+                const entries = song.stems.length ? song.stems : (song.source ? [song.source] : []);
+                if (!entries.length) { panel.textContent = '⚠ この曲には音声ファイルがありません。'; return; }
+                const files = [];
+                for (const e of entries) files.push(await e.handle.getFile());
+                clearStems();
+                await addFilesAsStems(files);
+                panel.innerHTML = song.stems.length
+                    ? '✅ <b>' + escapeHtml(song.name) + '</b> を読み込みました（' + song.stems.length + 'パート）。「▶ 再生」→「立体音響」ONでお楽しみください。'
+                    : '✅ <b>' + escapeHtml(song.name) + '</b>（未分離）を読み込みました。分離するには下の「＋ 分離する曲を選ぶ」から同じ曲を選んでください。';
+            } catch (e) {
+                console.error(e);
+                panel.textContent = '❌ 読み込みに失敗しました: ' + e.message;
+            }
+        }
+
+        sel.addEventListener('change', async () => {
+            const v = sel.value;
+            if (!v) return;
+            if (v.startsWith('wd:')) await loadWorkdirSong(workdirSongs[+v.slice(3)]);
+            else if (v.startsWith('lib:')) await window.loadStemLibrary(v.slice(4));
+        });
+
+        // ===== 分離完了後の保存 ================================================
+        // 作業フォルダがあれば自動保存、無ければダウンロードボタンを出す。
+        window.resetSavePanel = function () {
+            saveEl.style.display = 'none';
+            saveBtnsEl.innerHTML = '';
+            saveStatusEl.textContent = '';
+        };
+
+        async function writeWavFile(dirHandle, filename, buffer, onProgress) {
+            const fh = await dirHandle.getFileHandle(filename, { create: true });
+            const w = await fh.createWritable();
+            try {
+                const total = wavByteSize(buffer);
+                let done = 0;
+                for (const part of wavParts(buffer)) {
+                    await w.write(part);
+                    done += part.length;
+                    if (onProgress) onProgress(done / total);
+                }
+                await w.close();
+            } catch (e) {
+                try { await w.abort(); } catch (_) {}
+                throw e;
+            }
+        }
+
+        async function copySourceFile(dirHandle, file) {
+            const ext = (file.name.match(/\.[^.]+$/) || ['.bin'])[0].toLowerCase();
+            const fh = await dirHandle.getFileHandle('source' + ext, { create: true });
+            const w = await fh.createWritable();
+            try { await file.stream().pipeTo(w); }        // pipeTo が w を閉じる
+            catch (e) { try { await w.abort(); } catch (_) {} throw e; }
+        }
+
+        async function dirExists(parent, name) {
+            try { await parent.getDirectoryHandle(name); return true; }
+            catch (e) { return false; }
+        }
+
+        async function saveToWorkdir(list, srcFile) {
+            const base = sanitizeName(srcFile.name);
+            let dirName = base;
+            for (let i = 2; await dirExists(workdirHandle, dirName); i++) dirName = base + ' (' + i + ')';
+            const dir = await workdirHandle.getDirectoryHandle(dirName, { create: true });
+
+            const steps = list.length + 1;   // 分離結果 + 元の曲
+            let step = 0;
+            const report = (p) => {
+                saveStatusEl.textContent = `💾 「${dirName}」に保存しています… ${(((step + p) / steps) * 100).toFixed(0)}%`;
+            };
+            report(0);
+            await copySourceFile(dir, srcFile); step++;
+            for (const s of list) {
+                await writeWavFile(dir, s.name + '.wav', s.buffer, report);
+                step++;
+            }
+            return dirName;
+        }
+
+        function showDownloadButtons(list, baseName) {
+            saveBtnsEl.innerHTML = '';
+            list.forEach(s => {
+                const b = document.createElement('button');
+                b.className = 'btn save small';
+                b.textContent = `⬇ ${s.name}.wav`;
+                b.addEventListener('click', async () => {
+                    if (busySaving) return;
+                    busySaving = true;
+                    saveBtnsEl.querySelectorAll('button').forEach(x => x.disabled = true);
+                    const fname = `${baseName}_${s.name}.wav`;
+                    try {
+                        const parts = [];
+                        const total = wavByteSize(s.buffer);
+                        let done = 0;
+                        for (const part of wavParts(s.buffer)) {
+                            parts.push(new Blob([part]));
+                            done += part.length;
+                            saveStatusEl.textContent = `${fname} を書き出しています… ${(done / total * 100).toFixed(0)}%`;
+                            await new Promise(r => setTimeout(r, 0));   // UIを固めない
+                        }
+                        triggerDownload(new Blob(parts, { type: 'audio/wav' }), fname);
+                        // ブラウザ側でダウンロードが保留・ブロックされることがあるため「保存しました」と断定しない
+                        saveStatusEl.textContent = `✅ ${fname} を書き出しました。ブラウザのダウンロードフォルダをご確認ください（複数ファイルを続けて保存すると、ブラウザが許可を求めることがあります。その場合は「許可」を選んでください）。`;
+                    } catch (err) {
+                        console.error(err);
+                        saveStatusEl.textContent = `❌ 書き出しに失敗しました: ${err.message}`;
+                    } finally {
+                        busySaving = false;
+                        saveBtnsEl.querySelectorAll('button').forEach(x => x.disabled = false);
+                    }
+                });
+                saveBtnsEl.appendChild(b);
+            });
+        }
+
+        window.onSeparationDone = async function (list, srcFile) {
+            saveEl.style.display = '';
+            saveBtnsEl.innerHTML = '';
+            const baseName = sanitizeName(srcFile.name);
+
+            if (workdirHandle) {
+                saveNoteEl.innerHTML = '作業フォルダ <b>' + escapeHtml(workdirHandle.name) + '</b> に自動保存します（16bit / 44.1kHz のWAV）。';
+                try {
+                    const dirName = await saveToWorkdir(list, srcFile);
+                    saveStatusEl.innerHTML = '✅ <b>' + escapeHtml(workdirHandle.name) + ' / ' + escapeHtml(dirName) +
+                        '</b> に保存しました（元の曲＋' + list.length + 'パート）。次回このページを開いたら、上の「曲:」から選ぶだけで再生できます。';
+                    await refreshWorkdir(true);
+                    const idx = workdirSongs.findIndex(s => s.name === dirName);
+                    if (idx >= 0) sel.value = 'wd:' + idx;
+                } catch (e) {
+                    console.error(e);
+                    saveStatusEl.textContent = '❌ 作業フォルダへの保存に失敗しました: ' + e.message +
+                        '（下のボタンから手動でダウンロードできます）';
+                    showDownloadButtons(list, baseName);
+                }
+                return;
+            }
+
+            // 作業フォルダ未設定 → ダウンロードで保存してもらう
+            saveNoteEl.innerHTML = '分離結果は<b>このタブを閉じると消えます</b>（メモリ上にあるだけで、どこにも保存されていません）。' +
+                '下のボタンで<b>ご自身のPCに保存</b>してください（16bit / 44.1kHz のWAV。1分あたり約10MB）。' +
+                (FS_OK ? '<br>※上の「<b>📂 作業フォルダを選ぶ</b>」で保存先を決めておくと、次からは<b>分離後に自動保存</b>され、この操作は不要になります。' : '');
+            showDownloadButtons(list, baseName);
+            saveStatusEl.textContent = `保存できるもの: ${list.map(s => s.name + '.wav').join(' / ')}`;
+        };
+
+        // ===== フォールバック: フォルダから読み込む（webkitdirectory） =========
+        if (!('webkitdirectory' in document.createElement('input'))) {
+            folderBtn.style.display = 'none';   // iOS Safari など
+        } else {
+            folderBtn.addEventListener('click', () => folderInput.click());
+        }
+
+        function groupByFolder(files) {
+            const map = new Map();
+            for (const f of files) {
+                if (!AUDIO_RE.test(f.name)) continue;
+                const rel = f.webkitRelativePath || f.name;
+                const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+                if (!map.has(dir)) map.set(dir, []);
+                map.get(dir).push(f);
+            }
+            return Array.from(map.entries())
+                .map(([dir, fs]) => ({ dir, files: fs.sort((a, b) => a.name.localeCompare(b.name)) }))
+                .sort((a, b) => a.dir.localeCompare(b.dir));
+        }
+
+        async function loadFileGroup(group) {
+            panel.textContent = '読み込んでいます… ' + (group.dir || '選択したフォルダ');
+            clearStems();
+            sel.value = '';
+            await addFilesAsStems(group.files);
+            const label = group.dir ? group.dir.split('/').pop() : '選択したフォルダ';
+            panel.innerHTML = '✅ <b>' + escapeHtml(label) + '</b> を読み込みました（' +
+                group.files.length + 'パート）。「▶ 再生」→「立体音響」ONでお楽しみください。';
+        }
+
+        folderInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files || []);
+            e.target.value = '';
+            panel.style.display = '';
+            const groups = groupByFolder(files);
+            if (!groups.length) {
+                panel.innerHTML = '⚠ このフォルダには音声ファイル（wav / mp3 / flac / m4a など）が見つかりませんでした。';
+                return;
+            }
+            if (groups.length === 1) { await loadFileGroup(groups[0]); return; }
+            panel.innerHTML = '📁 ' + groups.length + '件の曲が見つかりました。再生したいものを選んでください：';
+            const listEl = document.createElement('div');
+            listEl.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;';
+            groups.forEach(g => {
+                const b = document.createElement('button');
+                b.className = 'btn small';
+                const label = g.dir ? g.dir.split('/').pop() : '（選択したフォルダ直下）';
+                b.textContent = label + '（' + g.files.length + 'パート）';
+                b.title = g.files.map(f => f.name).join(' / ');
+                b.addEventListener('click', () => loadFileGroup(g));
+                listEl.appendChild(b);
+            });
+            panel.appendChild(listEl);
+        });
+
+        // ===== 起動時 =========================================================
+        wdPickBtn.addEventListener('click', pickWorkdir);
+        wdRescanBtn.addEventListener('click', () => refreshWorkdir());
+        wdClearBtn.addEventListener('click', clearWorkdir);
+
+        (async function init() {
+            // 公開ライブラリ
+            try {
+                const lib = await getLibrary();
+                libSongs = (lib && lib.songs) || [];
+            } catch (e) { libSongs = []; }
+
+            // 前回の作業フォルダ（許可が残っていればそのまま使う）
+            if (FS_OK) {
+                try {
+                    const h = await idbGet(IDB_KEY);
+                    if (h) {
+                        if (await hasPermission(h, false)) {
+                            workdirHandle = h;
+                            await scanWorkdir();
+                            setWdStatus(workdirSongs.length
+                                ? `✅ 前回の作業フォルダ「${h.name}」から ${workdirSongs.length}曲を読み込みました。`
+                                : `✅ 作業フォルダ「${h.name}」を使います（まだ曲はありません）。`);
+                        } else {
+                            pendingHandle = h;
+                            setWdStatus(`前回の作業フォルダ「${h.name}」があります。ブラウザの仕様で、開き直すたびに一度だけ許可が必要です。上のボタンを押してください。`);
+                        }
+                    }
+                } catch (e) { console.warn('作業フォルダの復元に失敗:', e); }
+            }
+
+            populateSelect();
+            updateWorkdirUI();
+
+            const cur = new URLSearchParams(location.search).get('song');
+            if (cur) sel.value = 'lib:' + cur;
+        })();
     })();
 
     // ?song=<id> があれば自動読み込み
@@ -1682,6 +2250,7 @@
         spinnerEl.style.display = 'block';
         document.getElementById('sepWarn').style.display = '';
         fnameEl.textContent = file.name;
+        if (window.resetSavePanel) window.resetSavePanel();   // 前回の保存表示を片付ける
         startElapsed();
         armUnloadGuard();
         // 進捗が確実に見えるよう、分離パネルまでスクロール
@@ -1754,6 +2323,10 @@
             elapsedEl.textContent = '所要時間 ' + fmtMMSS(+secs);
             document.getElementById('sepWarn').style.display = 'none';
             setStatus(`✅ 分離完了（${fmtMMSS(+secs)}）。下のプレイヤーに ${list.length} パート（vocals / drums / bass / other）を追加しました。「▶ 再生」を押し、「立体音響」をONにしてみてください。`);
+            // 保存（作業フォルダが設定されていれば自動保存、無ければダウンロード案内）
+            if (window.onSeparationDone) {
+                try { await window.onSeparationDone(list, file); } catch (err) { console.error(err); }
+            }
         } catch (e) {
             console.error(e);
             bar.classList.remove('indet'); bar.style.width = '0%';
