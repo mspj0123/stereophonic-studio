@@ -61,6 +61,7 @@
     <div class="row">
       <input type="file" id="file" accept="audio/*">
       <label><input type="checkbox" id="useGpu"> WebGPU を使う（対応端末のみ・高速）</label>
+      <label>スレッド <select id="threads"></select></label>
     </div>
     <div class="row" style="margin-top:12px">
       <button id="start" disabled>分離して再生する</button>
@@ -108,9 +109,11 @@
    ========================================================================= */
 
 const SAMPLE_RATE   = 44100;
-const MIN_LEAD_SEC  = 12;    // 最低でもこれだけは貯めてから鳴らす（チャンク約2つ分）
-const SAFETY        = 1.15;  // 分離が15%遅くなっても耐えるための安全率
+const MIN_LEAD_SEC  = 8;     // 最低でもこれだけは貯めてから鳴らす（チャンク約1.5個分）
+const MARGIN_SEC    = 8;     // 理論値に足す余裕（秒）。※R への掛け算にしないこと（下記）
 const LEAD_WARN_SEC = 120;   // これを超える先読みはメモリ警告を出す
+const WARMUP_CHUNKS = 1;     // 最初のNチャンクは速度の計測に使わない（初回推論が遅いため）
+const RATE_WINDOW   = 5;     // R は直近Nチャンクの中央値で出す（外れ値に引きずられないように）
 
 // 既定の定位。聴取者は原点、正面が -Z。
 const LAYOUT = {
@@ -140,13 +143,42 @@ const S = {
   songLen: 0,          // 曲の長さ(秒)
   separated: 0,        // 分離済みの長さ(秒)
   sepStartAt: 0,       // 分離を始めた時刻(performance.now)
-  rate: null,          // R（実測）
+  rate: null,          // R（実測。直近の中央値）
+  rateSamples: [],     // 各チャンクの R。先頭 WARMUP_CHUNKS 個は捨てる
+  chunkCount: 0,
   playStartAt: null,   // 再生開始時の audioCtx.currentTime
   pending: [],         // 未予約のチャンク
   starving: 0,         // スタベーション回数
   leadSec: MIN_LEAD_SEC,
   running: false, done: false,
 };
+
+/* ---------- スレッド数 ---------------------------------------------------
+   既存ページは上限4に固定している。これは 2026-07-21 の OOM 対策として入れた値で、
+   2026-08-17 のメモリ改修（ピーク 436.8MB → 41.3MB）より前の前提のまま残っていた。
+   本ページは分離結果を貯め込まない作りなので、上限を上げて速度を取りにいく。
+   既存ページの設定には影響しない（あちらの wasmThreads() は触っていない）。 */
+function defaultThreads() {
+  if (!self.crossOriginIsolated) return 1;          // スレッドが使えない
+  const cores = navigator.hardwareConcurrency || 4;
+  return Math.max(1, Math.min(8, cores - 2));       // UIと他タブのぶんを残す
+}
+
+function setupThreadSelect() {
+  const sel = $('threads');
+  const cores = navigator.hardwareConcurrency || 4;
+  const max = self.crossOriginIsolated ? Math.min(16, cores) : 1;
+  const def = defaultThreads();
+  for (let n = 1; n <= max; n++) {
+    const o = document.createElement('option');
+    o.value = String(n);
+    o.textContent = n === def ? `${n}（既定）` : String(n);
+    if (n === def) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.disabled = !self.crossOriginIsolated;
+}
+setupThreadSelect();
 
 /* ---------- 環境の表示 -------------------------------------------------- */
 (async function env() {
@@ -270,10 +302,29 @@ $('is3d').addEventListener('change', () => {
 //   R <= 1 なら右辺は0以下＝最初のチャンクだけで足りる。
 function requiredLead() {
   if (!S.rate || !S.songLen) return MIN_LEAD_SEC;
-  const rSafe = S.rate * SAFETY;
-  const need = rSafe <= 1 ? 0 : S.songLen * (1 - 1 / rSafe);
+  // R が1に近いとき、安全率を R に掛けると必要先読みが跳ね上がる。
+  //   実測 R=1.08 の4分の曲: 掛け算(×1.15) → 47秒 / 絶対値(+8秒) → 26秒
+  // 追いつかなくても suspend して貯め直せる（音は割れない）ので、
+  // 掛け算で先回りするより、固定の余裕を足すほうが釣り合いがよい。
+  const need = S.rate <= 1 ? 0 : S.songLen * (1 - 1 / S.rate);
   const grow = 1 + 0.5 * Math.max(0, S.starving - 2); // 3回目以降のスタベーションで増やす
-  return Math.max(need * grow, MIN_LEAD_SEC);
+  return Math.max((need + MARGIN_SEC) * grow, MIN_LEAD_SEC);
+}
+
+// R は「直近 RATE_WINDOW 個の中央値」。平均だと外れ値がいつまでも残る。
+function updateRate(r) {
+  S.chunkCount++;
+  // 初回のチャンクは ONNX の初回推論（グラフ最適化・メモリ確保）を含むため速度の代表値にならない。
+  // 実測: 4分の曲で 1個目 15秒 / 2個目 6秒 / 3個目 5秒（チャンクは5.85秒ぶん）。
+  // これを混ぜると R が 2.7 と出て、先読みを 164秒 と過大に見積もっていた。
+  if (S.chunkCount <= WARMUP_CHUNKS) { log(`1個目は暖機のため速度計測から除外（${r.toFixed(2)}×）`); return; }
+  S.rateSamples.push(r);
+  if (S.rateSamples.length > RATE_WINDOW) S.rateSamples.shift();
+  const sorted = [...S.rateSamples].sort((a, b) => a - b);
+  S.rate = sorted[Math.floor(sorted.length / 2)];
+  if (S.playStartAt == null) {
+    log(`${S.chunkCount}個目 ${r.toFixed(2)}× → R=${S.rate.toFixed(2)} / 必要先読み ${requiredLead().toFixed(0)}秒`);
+  }
 }
 
 function updateStats() {
@@ -331,9 +382,19 @@ function tryStartPlayback() {
   }
   if (S.separated < S.leadSec && !S.done) return;
 
-  // 予約の基準時刻。少し余裕を持たせてから鳴らし始める
+  // 予約の基準時刻。少し余裕を持たせてから鳴らし始める。
+  // suspended のときは currentTime が進まないため、予約はそのまま生きる。
   S.playStartAt = S.audioCtx.currentTime + 0.15;
-  $('phase').textContent = '再生中';
+  S.audioCtx.resume().catch(() => {});
+  if (S.audioCtx.state === 'suspended') {
+    $('phase').textContent = 'クリック待ち';
+    log('ブラウザが自動再生を止めています。ページのどこかをクリックしてください', 'warn');
+    const kick = () => { S.audioCtx && S.audioCtx.resume().then(() => {
+      $('phase').textContent = '再生中'; log('再生を開始しました', 'ok'); }).catch(() => {}); };
+    document.addEventListener('click', kick, { once: true });
+  } else {
+    $('phase').textContent = '再生中';
+  }
   log(`再生開始（先読み ${S.separated.toFixed(1)}秒 / 必要 ${S.leadSec.toFixed(1)}秒）`, 'ok');
   for (const c of S.pending) scheduleChunk(c);
   S.pending.length = 0;
@@ -372,8 +433,9 @@ $('start').addEventListener('click', async () => {
   $('start').disabled = true; $('stop').disabled = false;
   $('log').innerHTML = '';
   Object.assign(S, {
-    songLen: 0, separated: 0, rate: null, playStartAt: null,
-    pending: [], starving: 0, leadSec: MIN_LEAD_SEC, running: true, done: false
+    songLen: 0, separated: 0, rate: null, rateSamples: [], chunkCount: 0,
+    playStartAt: null, pending: [], starving: 0, leadSec: MIN_LEAD_SEC,
+    running: true, done: false
   });
 
   try {
@@ -382,7 +444,11 @@ $('start').addEventListener('click', async () => {
 
     const g = buildGraph();
     S.audioCtx = g.ctx; S.master = g.master; S.stems = g.stems;
-    await S.audioCtx.resume();
+    // ここで await してはいけない。自動再生ポリシーによりユーザー操作が無いと
+    // resume() の Promise は解決せず、**デコードも分離も始まらないまま固まる**
+    // （実測: ctxState=suspended のまま「読み込み中」で停止）。
+    // 分離は音を出さないので、鳴らす直前まで resume を待つ必要がない。
+    S.audioCtx.resume().catch(() => {});
 
     const decoded = await S.audioCtx.decodeAudioData(await file.arrayBuffer());
     const left  = decoded.getChannelData(0);
@@ -418,9 +484,7 @@ $('start').addEventListener('click', async () => {
         const wallSec = (now - lastChunkAt) / 1000;
         lastChunkAt = now;
 
-        // R を移動平均で更新（最初の1個は丸ごと採用）
-        const r = wallSec / audioSec;
-        S.rate = S.rate == null ? r : (S.rate * 0.7 + r * 0.3);
+        updateRate(wallSec / audioSec);
         S.separated = (m.offset + m.length) / SAMPLE_RATE;
 
         if (S.playStartAt == null) S.pending.push(m);
@@ -441,10 +505,11 @@ $('start').addEventListener('click', async () => {
           S.worker.terminate();
           S.worker = new Worker('separator-worker.js', { type: 'module' });
           S.worker.onmessage = onWorkerMessage;
-          S.rate = null; S.separated = 0; S.pending.length = 0;
+          S.rate = null; S.rateSamples = []; S.chunkCount = 0;
+          S.separated = 0; S.pending.length = 0;
           S.worker.postMessage({ type: 'separate', left, right,
             sampleRate: decoded.sampleRate, useGpu: false,
-            threads: Math.min(4, navigator.hardwareConcurrency || 1) });
+            threads: Number($('threads').value) || 1 });
         } else {
           stopAll();
         }
@@ -457,7 +522,7 @@ $('start').addEventListener('click', async () => {
       left, right,
       sampleRate: decoded.sampleRate,
       useGpu: $('useGpu').checked,
-      threads: Math.min(4, navigator.hardwareConcurrency || 1)
+      threads: Number($('threads').value) || 1
     });
 
   } catch (err) {
