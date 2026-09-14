@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鳴っている音を取り込んで分離（試験）｜立体音響スタジオ</title>
+<!-- クロスオリジン分離を静的ホスト(GitHub Pages)で有効化（SharedArrayBuffer用・MIT） -->
+<script src="coi-serviceworker.js"></script>
+<style>
+  .lvl{height:10px;background:#0b0e13;border-radius:5px;overflow:hidden;margin:8px 0;
+       border:1px solid var(--line)}
+  .lvl>i{display:block;height:100%;width:0;background:var(--ok);transition:width .08s}
+  .lvl>i.hot{background:var(--err)}
+  .rec{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--err);
+       margin-right:6px;animation:blink 1s infinite}
+  @keyframes blink{50%{opacity:.25}}
+  .steps{counter-reset:s}
+  .steps>div{margin-bottom:14px}
+  .warnbox{background:#2b2113;border:1px solid #5c4413;border-radius:8px;padding:10px 12px;
+           font-size:12px;color:#e3b341;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>鳴っている音を取り込んで分離 <span class="pill">試験ページ</span></h1>
+  <p class="sub">
+    PCで鳴っている音やマイク・ライン入力を取り込み、
+    <strong>ボーカルだけにしたり、位置を動かして</strong>聴けます。
+    既存のプレイヤーとは独立していて、互いに影響しません。
+    <br>手元のファイルを使う場合は <a href="stream.html">こちら</a>。
+  </p>
+
+  <div class="card steps">
+    <h2>1. 取り込み元を選ぶ</h2>
+
+    <div>
+      <button id="permit" class="sec">マイク・ライン入力の使用を許可する</button>
+      <span class="note" id="permitNote">許可すると、下の一覧に入力機器が出ます</span>
+    </div>
+
+    <div>
+      <label>入力機器 <select id="device" disabled><option>（未許可）</option></select></label>
+      <button id="useDev" disabled>この機器から取り込む</button>
+    </div>
+
+    <div>
+      <button id="useTab" class="sec">PCで鳴っている音を取り込む（タブ／画面を選ぶ）</button>
+      <span class="note">Chromeの共有画面で<b>「タブの音声を共有」にチェック</b>を入れてください</span>
+    </div>
+
+    <div class="lvl"><i id="lvl"></i></div>
+    <p class="note" id="srcNote">まだ取り込んでいません</p>
+
+    <div class="warnbox">
+      <b>お使いになる前に。</b>
+      取り込んだ音は<b>すべてこのPCの中だけ</b>で処理され、外部に送られることはありません。
+      ただし、<b>分離した結果は元の楽曲の派生物</b>です。手元で聴く範囲を超えて配布・公開すると
+      私的使用の範囲を外れます。また各配信サービスの利用規約はそれぞれ異なるため、
+      <b>取り込んでよいかはご自身でご確認ください</b>。
+      なお、DRMで保護された音は Chrome 側で遮断され<b>無音になります</b>
+      （上のレベル表示が動かないときはこれが原因のことがあります）。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. 録る</h2>
+    <div class="row">
+      <button id="rec" disabled>録音を開始</button>
+      <button id="recStop" class="sec" disabled>録音を停止</button>
+      <span id="recState" class="note">待機中</span>
+    </div>
+    <p class="note">上限は10分です。長いほど分離に時間がかかります。まずは1〜2分で試すことをおすすめします。</p>
+  </div>
+
+  <div class="card">
+    <h2>3. 分離して再生する</h2>
+    <div id="engine-controls"></div>
+  </div>
+
+  <div id="engine-ui"></div>
+
+</div>
+
+<script type="module">
+/* 音声入力を入口にする薄い層。
+   分離・先読み再生・立体音響は engine.js（stream.html と共通）が持つ。
+
+   「配信を取り込む」のではなく「音声入力を受ける」作りにしている。
+   レコードプレーヤーを繋ぐのと同じ扱いで、特定サービスを対象にしない。 */
+import { initEngine, setReady, engineLog } from './engine.js';
+
+const SAMPLE_RATE = 44100;
+const MAX_SEC = 600;                 // 10分。これ以上はメモリが厳しい
+const $ = (id) => document.getElementById(id);
+
+let stream = null, ctx = null, node = null, srcNode = null, analyser = null;
+let recording = false, parts = [], total = 0, recStartAt = 0, captured = null;
+let silentTimer = null;
+
+// 生のPCMを集めるための AudioWorklet。別ファイルにせず Blob で持つ。
+const WORKLET = `
+class Rec extends AudioWorkletProcessor {
+  process(inputs) {
+    const inp = inputs[0];
+    if (inp && inp.length) {
+      const l = inp[0];
+      const r = inp[1] || inp[0];
+      if (l && l.length) this.port.postMessage({ l: l.slice(), r: r.slice() });
+    }
+    return true;
+  }
+}
+registerProcessor('rec', Rec);
+`;
+
+function setSrcNote(text, cls) {
+  const el = $('srcNote');
+  el.textContent = text;
+  el.className = 'note ' + (cls || '');
+}
+
+async function attach(newStream, label) {
+  detach();
+  stream = newStream;
+  ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+  await ctx.audioWorklet.addModule(
+    URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })));
+
+  // 止まったままの AudioContext では AudioWorklet の process() が呼ばれず、
+  // **「録音中」と出ているのに1サンプルも取れない**（実測: 11秒録って 0.0秒）。
+  // await してはいけない（自動再生ポリシーで解決しないことがある）。
+  ctx.resume().catch(() => {});
+
+  srcNode = ctx.createMediaStreamSource(stream);
+  node = new AudioWorkletNode(ctx, 'rec');
+  node.port.onmessage = (e) => {
+    if (!recording) return;
+    parts.push(e.data);
+    total += e.data.l.length;
+    const sec = total / SAMPLE_RATE;
+    $('recState').innerHTML = `<span class="rec"></span>録音中 ${sec.toFixed(1)} 秒`;
+    if (sec >= MAX_SEC) { engineLog(`上限の${MAX_SEC / 60}分に達したため録音を止めました`, 'warn'); stopRec(); }
+  };
+
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  srcNode.connect(analyser);
+  srcNode.connect(node);
+  // 取り込んだ音はここでは鳴らさない（元の音とハウリング・二重再生になるため）
+  node.connect(ctx.createGain());   // 出力には繋がない
+
+  // 取り込み元が止められたら（タブを閉じた等）片付ける
+  for (const t of stream.getTracks()) t.onended = () => { setSrcNote('取り込み元が終了しました', 'warn'); detach(); };
+
+  setSrcNote(`取り込み中: ${label}`, 'ok');
+  $('rec').disabled = false;
+  meter();
+}
+
+function detach() {
+  clearTimeout(silentTimer);
+  recording = false;
+  if (stream) { for (const t of stream.getTracks()) t.stop(); stream = null; }
+  if (ctx) { ctx.close().catch(() => {}); ctx = null; }
+  node = srcNode = analyser = null;
+  $('rec').disabled = true; $('recStop').disabled = true;
+  $('lvl').style.width = '0';
+}
+
+// レベル表示。無音（DRM遮断など）をその場で気づけるようにする。
+function meter() {
+  const buf = new Float32Array(1024);
+  const tick = () => {
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(buf);
+    let peak = 0;
+    for (const v of buf) { const a = Math.abs(v); if (a > peak) peak = a; }
+    const el = $('lvl');
+    el.style.width = Math.min(100, peak * 140) + '%';
+    el.className = peak > 0.95 ? 'hot' : '';
+    requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+/* ---------- 取り込み元 --------------------------------------------------- */
+$('permit').addEventListener('click', async () => {
+  try {
+    // 機器名を出すには一度許可が要る（許可前はラベルが空になる仕様）
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    for (const t of s.getTracks()) t.stop();
+    const devs = (await navigator.mediaDevices.enumerateDevices())
+      .filter(d => d.kind === 'audioinput');
+    const sel = $('device');
+    sel.innerHTML = '';
+    for (const d of devs) {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || '(名前なし)';
+      sel.appendChild(o);
+    }
+    sel.disabled = false; $('useDev').disabled = false;
+    $('permitNote').textContent = `${devs.length}件の入力機器が見つかりました`;
+    // PCで鳴っている音は Linux(PipeWire/PulseAudio) では「モニター」として出る
+    if (devs.some(d => /monitor|モニター/i.test(d.label))) {
+      $('permitNote').textContent += '（「Monitor」が付いたものがPCで鳴っている音です）';
+    }
+  } catch (e) {
+    $('permitNote').textContent = `許可されませんでした: ${e.message}`;
+  }
+});
+
+$('useDev').addEventListener('click', async () => {
+  const id = $('device').value;
+  const label = $('device').selectedOptions[0]?.textContent || '入力機器';
+  try {
+    // 音楽を扱うので、声用の補正はすべて切る（切らないと分離が壊れる）
+    const s = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { exact: id }, echoCancellation: false,
+               noiseSuppression: false, autoGainControl: false }
+    });
+    await attach(s, label);
+  } catch (e) { setSrcNote(`取り込めませんでした: ${e.message}`, 'err'); }
+});
+
+$('useTab').addEventListener('click', async () => {
+  try {
+    const s = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+    if (!s.getAudioTracks().length) {
+      for (const t of s.getTracks()) t.stop();
+      setSrcNote('音声が共有されていません。共有画面で「タブの音声を共有」にチェックを入れてください', 'warn');
+      return;
+    }
+    for (const t of s.getVideoTracks()) t.stop();   // 映像は要らない
+    await attach(s, 'タブ／画面の音');
+  } catch (e) { setSrcNote(`取り込めませんでした: ${e.message}`, 'err'); }
+});
+
+/* ---------- 録音 --------------------------------------------------------- */
+$('rec').addEventListener('click', () => {
+  parts = []; total = 0; captured = null; recording = true; recStartAt = performance.now();
+  $('rec').disabled = true; $('recStop').disabled = false;
+  setReady(false);
+  $('recState').innerHTML = '<span class="rec"></span>録音中 0.0 秒';
+
+  if (ctx && ctx.state !== 'running') {
+    ctx.resume().catch(() => {});
+    engineLog('ブラウザが音の取り込みを止めています。ページのどこかをクリックしてください', 'warn');
+    document.addEventListener('click', () => ctx && ctx.resume().catch(() => {}), { once: true });
+  }
+  // 実際に音が届いているかを見張る。届かなければ黙って失敗させない。
+  clearTimeout(silentTimer);
+  silentTimer = setTimeout(() => {
+    if (recording && total === 0) {
+      engineLog('3秒たっても音が1つも届いていません。取り込み元が違うか、'
+        + 'DRMで保護されている可能性があります（レベル表示も確認してください）', 'warn');
+      $('recState').textContent = '音が届いていません';
+    }
+  }, 3000);
+});
+
+function stopRec() {
+  if (!recording) return;
+  recording = false;
+  clearTimeout(silentTimer);
+  $('rec').disabled = !stream; $('recStop').disabled = true;
+
+  const n = total;
+  if (!n) {
+    $('recState').textContent = '音が入っていません';
+    engineLog(`音が1つも届きませんでした（取り込み状態: ${ctx ? ctx.state : '未接続'}）。`
+      + '取り込み元の選び直しか、ページのどこかをクリックしてからやり直してください', 'err');
+    return;
+  }
+  // 集めた断片を1本に繋ぐ
+  const left = new Float32Array(n), right = new Float32Array(n);
+  let at = 0;
+  for (const p of parts) { left.set(p.l, at); right.set(p.r, at); at += p.l.length; }
+  parts = [];
+  captured = { left, right, sampleRate: SAMPLE_RATE, duration: n / SAMPLE_RATE };
+
+  let peak = 0;
+  for (let i = 0; i < n; i += 97) { const a = Math.abs(left[i]); if (a > peak) peak = a; }
+  $('recState').textContent = `録音済み ${(n / SAMPLE_RATE).toFixed(1)} 秒（最大音量 ${(peak * 100).toFixed(0)}%）`;
+  if (peak < 0.001) {
+    engineLog('録音した音がほぼ無音です。DRMで保護されているか、取り込み元が違う可能性があります', 'warn');
+  }
+  setReady(true);
+}
+$('recStop').addEventListener('click', stopRec);
+
+/* ---------- エンジンに渡す ------------------------------------------------ */
+initEngine({
+  startLabel: '録った音を分離して再生する',
+  canStart: () => !!captured,
+  getAudio: async () => {
+    if (!captured) throw new Error('先に録音してください');
+    return { ...captured, label: '取り込んだ音' };
+  },
+});
+</script>
+</body>
+</html>
