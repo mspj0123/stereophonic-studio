@@ -45,6 +45,32 @@
   .err{color:var(--err)} .warn{color:var(--warn)} .ok{color:var(--ok)}
   .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;
         background:#21262d;color:var(--muted);border:1px solid var(--line)}
+  button.small{padding:3px 10px;font-size:12px;margin-left:10px}
+  .posgrid{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start}
+  .padtitle{color:var(--muted);font-size:12px;margin-bottom:8px}
+  .padtitle b{color:var(--fg)}
+  #pad{position:relative;width:300px;height:300px;background:#0b0e13;
+       border:1px solid var(--line);border-radius:10px;touch-action:none;cursor:crosshair}
+  #pad .ax{position:absolute;background:#222a35}
+  #pad .ax.h{left:0;right:0;top:50%;height:1px}
+  #pad .ax.v{top:0;bottom:0;left:50%;width:1px}
+  #pad .ring{position:absolute;left:10%;top:10%;width:80%;height:80%;
+             border:1px dashed #222a35;border-radius:50%}
+  #pad .plabel{position:absolute;color:#4a5563;font-size:11px}
+  #pad .plabel.front{top:6px;left:50%;transform:translateX(-50%)}
+  #pad .plabel.back{bottom:6px;left:50%;transform:translateX(-50%)}
+  #pad .plabel.left{left:6px;top:50%;transform:translateY(-50%)}
+  #pad .plabel.right{right:6px;top:50%;transform:translateY(-50%)}
+  #me{position:absolute;left:50%;top:50%;width:10px;height:10px;margin:-5px 0 0 -5px;
+      border-radius:50%;background:#6e7681;box-shadow:0 0 0 4px rgba(110,118,129,.18)}
+  .dot{position:absolute;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;
+       display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;
+       cursor:grab;user-select:none;border:2px solid transparent}
+  .dot.sel{border-color:#fff}
+  .dot.off{opacity:.3}
+  .hwrap{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .hwrap input[type=range]{writing-mode:vertical-lr;direction:rtl;width:28px;height:230px}
+  .hlabel{color:#4a5563;font-size:11px}
 </style>
 </head>
 <body>
@@ -88,7 +114,32 @@
   </div>
 
   <div class="card">
-    <h2>3. パート</h2>
+    <h2>3. 音の位置</h2>
+    <div class="posgrid">
+      <div>
+        <div class="padtitle">前後左右 ── 選択中: <b id="selName">ボーカル</b>
+          <button id="reset" class="sec small">配置を戻す</button></div>
+        <div id="pad">
+          <div class="ax h"></div><div class="ax v"></div>
+          <div class="ring"></div>
+          <div class="plabel front">前</div><div class="plabel back">後</div>
+          <div class="plabel left">左</div><div class="plabel right">右</div>
+          <div id="me" title="あなた（聴いている位置）"></div>
+        </div>
+        <p class="note">丸をドラッグすると位置が変わります。**再生中でもそのまま動かせます。**</p>
+      </div>
+      <div class="hwrap">
+        <div class="padtitle">上下</div>
+        <div class="hlabel">上</div>
+        <input type="range" id="height" min="-5" max="5" step="0.1" value="0">
+        <div class="hlabel">下</div>
+        <div class="note" id="posText">x 0.0 / y 0.0 / z 0.0</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>4. パート</h2>
     <div class="stems" id="stems"></div>
   </div>
 
@@ -116,12 +167,24 @@ const WARMUP_CHUNKS = 1;     // 最初のNチャンクは速度の計測に使�
 const RATE_WINDOW   = 5;     // R は直近Nチャンクの中央値で出す（外れ値に引きずられないように）
 
 // 既定の定位。聴取者は原点、正面が -Z。
+// 値は既存ページ（index.html の PRESET_POS）と同一にしてある。
+// 片方だけ動かすと「同じ曲なのに鳴り方が違う」ことになるため、変えるなら両方。
 const LAYOUT = {
-  vocals: { x: 0,  y: 0, z: -2, label: 'ボーカル' },
-  drums : { x: 0,  y: 1, z:  2, label: 'ドラム'   },
-  bass  : { x: -2, y: 0, z:  0, label: 'ベース'   },
-  other : { x: 2,  y: 0, z:  0, label: 'その他'   },
+  vocals: { x: 0, y:  0,   z: -2.5, label: 'ボーカル' },
+  drums : { x: 0, y:  0,   z:  2.5, label: 'ドラム'   },
+  bass  : { x: 0, y: -1.0, z: -0.5, label: 'ベース'   },
+  other : { x: 0, y:  1.5, z:  0,   label: 'その他'   },
 };
+const PAD_RANGE = 5;   // パッドの端＝±5（既存ページと同じ）
+// LAYOUT は再生前のドラッグで書き換わるため、戻し先は別に固定しておく
+const DEFAULT_POS = Object.fromEntries(
+  Object.entries(LAYOUT).map(([k, v]) => [k, { x: v.x, y: v.y, z: v.z }]));
+
+// 距離による高音の減衰。既存ページ（computeLPFCutoff）と同じ式。
+function lpfCutoff(x, y, z) {
+  const dist = Math.sqrt(x * x + y * y + z * z);
+  return Math.max(1500, 20000 - dist * dist * 250);
+}
 const TRACKS = ['drums', 'bass', 'other', 'vocals'];
 
 const $ = (id) => document.getElementById(id);
@@ -221,6 +284,7 @@ function buildGraph() {
 
     const volumeGain = ctx.createGain();
     volumeGain.gain.value = 1;
+    // 分離前にパッドで動かしていたら、その位置のまま始める
 
     const directGain = ctx.createGain();
     directGain.gain.value = is3D ? 0 : 1;
@@ -237,7 +301,7 @@ function buildGraph() {
 
     const airLPF = ctx.createBiquadFilter();
     airLPF.type = 'lowpass';
-    airLPF.frequency.value = 12000;
+    airLPF.frequency.value = lpfCutoff(pos.x, pos.y, pos.z);
     airLPF.Q.value = 0.5;
 
     const threeDGain = ctx.createGain();
@@ -248,7 +312,8 @@ function buildGraph() {
     panner.connect(airLPF);
     airLPF.connect(threeDGain).connect(master);
 
-    stems[name] = { volumeGain, directGain, panner, airLPF, threeDGain, muted: false };
+    stems[name] = { volumeGain, directGain, panner, airLPF, threeDGain,
+                    muted: false, x: pos.x, y: pos.y, z: pos.z };
   }
   return { ctx, master, stems };
 }
@@ -264,7 +329,11 @@ function renderStems() {
       <h3>${pos.label}</h3>
       <label><input type="checkbox" data-mute="${name}" checked> 鳴らす</label>
       <input type="range" data-vol="${name}" min="0" max="150" value="100">
-      <div class="note">x:${pos.x} y:${pos.y} z:${pos.z}</div>`;
+      <div class="note">押すと上のパッドで選択されます</div>`;
+    el.addEventListener('click', (ev) => {
+      if (ev.target.tagName === 'INPUT') return;   // 操作系は邪魔しない
+      selected = name; drawDots();
+    });
     box.appendChild(el);
   }
   box.addEventListener('input', (e) => {
@@ -283,9 +352,138 @@ function renderStems() {
     s.muted = !t.checked;
     const vol = box.querySelector(`[data-vol="${t.dataset.mute}"]`);
     s.volumeGain.gain.value = s.muted ? 0 : Number(vol.value) / 100;
+    drawDots();
   });
 }
 renderStems();
+
+/* ---------- 音の位置（パッド） ------------------------------------------
+   既存ページと同じ座標系・同じ式を使う（PRESET_POS / computeLPFCutoff）。
+   違うのは「再生中でも動かせる」点で、ノード鎖は曲の間ずっと使い回しているため
+   チャンクを予約し直す必要がない。 */
+const COLOR = { vocals: '#4d9fff', drums: '#f0883e', bass: '#3fb950', other: '#bc8cff' };
+let selected = 'vocals';
+
+function padSize() { const p = $('pad'); return { w: p.clientWidth, h: p.clientHeight }; }
+const toPad = (v, size) => (v / PAD_RANGE) * (size / 2) + (size / 2);
+const fromPad = (px, size) => ((px - size / 2) / (size / 2)) * PAD_RANGE;
+
+function buildDots() {
+  const pad = $('pad');
+  pad.querySelectorAll('.dot').forEach(d => d.remove());
+  for (const name of TRACKS) {
+    const d = document.createElement('div');
+    d.className = 'dot' + (name === selected ? ' sel' : '');
+    d.dataset.name = name;
+    d.style.background = COLOR[name];
+    d.textContent = LAYOUT[name].label.slice(0, 2);
+    pad.appendChild(d);
+  }
+  drawDots();
+}
+
+function drawDots() {
+  const { w, h } = padSize();
+  for (const name of TRACKS) {
+    const d = $('pad').querySelector(`.dot[data-name="${name}"]`);
+    if (!d) continue;
+    const p = S.stems ? S.stems[name] : LAYOUT[name];
+    d.style.left = toPad(p.x, w) + 'px';
+    d.style.top  = toPad(p.z, h) + 'px';
+    d.classList.toggle('sel', name === selected);
+    d.classList.toggle('off', !!(S.stems && S.stems[name].muted));
+  }
+  const cur = S.stems ? S.stems[selected] : LAYOUT[selected];
+  $('selName').textContent = LAYOUT[selected].label;
+  $('height').value = cur.y;
+  $('posText').textContent = `x ${cur.x.toFixed(1)} / y ${cur.y.toFixed(1)} / z ${cur.z.toFixed(1)}`;
+}
+
+// 位置を音に反映する。setTargetAtTime で滑らかに動かす（既存ページと同じ 0.02 / 0.05）。
+function applyPos(name) {
+  if (!S.stems || !S.audioCtx) return;
+  const s = S.stems[name];
+  const cut = lpfCutoff(s.x, s.y, s.z);
+  // 鳴っていないときに setTargetAtTime を使うと、currentTime が進まないため
+  // 予約だけが積み上がって位置が反映されない。止まっている間は直接入れる。
+  if (S.audioCtx.state !== 'running') {
+    s.panner.positionX.value = s.x;
+    s.panner.positionY.value = s.y;
+    s.panner.positionZ.value = s.z;
+    s.airLPF.frequency.value = cut;
+    return;
+  }
+  const t = S.audioCtx.currentTime;
+  s.panner.positionX.setTargetAtTime(s.x, t, 0.02);
+  s.panner.positionY.setTargetAtTime(s.y, t, 0.02);
+  s.panner.positionZ.setTargetAtTime(s.z, t, 0.02);
+  s.airLPF.frequency.setTargetAtTime(cut, t, 0.05);
+}
+
+function setPos(name, x, z) {
+  const target = S.stems ? S.stems[name] : LAYOUT[name];
+  const r = Math.hypot(x, z);
+  // 円の外へは出さない（既存ページと同じ扱い）
+  if (r > PAD_RANGE) { target.x = x / r * PAD_RANGE; target.z = z / r * PAD_RANGE; }
+  else { target.x = x; target.z = z; }
+  applyPos(name);
+  drawDots();
+}
+
+(function padEvents() {
+  const pad = $('pad');
+  let dragging = null;
+  const nearest = (px, py) => {
+    const { w, h } = padSize();
+    let best = null, min = 30;
+    for (const name of TRACKS) {
+      const p = S.stems ? S.stems[name] : LAYOUT[name];
+      const d = Math.hypot(px - toPad(p.x, w), py - toPad(p.z, h));
+      if (d < min) { min = d; best = name; }
+    }
+    return best;
+  };
+  const local = (e) => { const r = pad.getBoundingClientRect();
+                         return [e.clientX - r.left, e.clientY - r.top]; };
+
+  pad.addEventListener('pointerdown', (e) => {
+    const [px, py] = local(e);
+    const hit = nearest(px, py);
+    if (!hit) return;
+    selected = hit; dragging = hit;
+    try { pad.setPointerCapture(e.pointerId); } catch {}
+    drawDots();
+  });
+  pad.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const [px, py] = local(e); const { w, h } = padSize();
+    setPos(dragging, fromPad(px, w), fromPad(py, h));
+  });
+  const end = (e) => { if (dragging) { dragging = null;
+    try { pad.releasePointerCapture(e.pointerId); } catch {} } };
+  pad.addEventListener('pointerup', end);
+  pad.addEventListener('pointercancel', end);
+})();
+
+$('height').addEventListener('input', () => {
+  const target = S.stems ? S.stems[selected] : LAYOUT[selected];
+  target.y = parseFloat($('height').value);
+  applyPos(selected);
+  drawDots();
+});
+
+$('reset').addEventListener('click', () => {
+  for (const name of TRACKS) {
+    const t = S.stems ? S.stems[name] : LAYOUT[name];
+    const d = DEFAULT_POS[name];
+    t.x = d.x; t.y = d.y; t.z = d.z;
+    applyPos(name);
+  }
+  drawDots();
+  log('配置を既定に戻しました');
+});
+
+buildDots();
 
 $('is3d').addEventListener('change', () => {
   if (!S.stems || !S.audioCtx) return;
@@ -444,6 +642,7 @@ $('start').addEventListener('click', async () => {
 
     const g = buildGraph();
     S.audioCtx = g.ctx; S.master = g.master; S.stems = g.stems;
+    drawDots();   // 新しい stems の位置でパッドを描き直す
     // ここで await してはいけない。自動再生ポリシーによりユーザー操作が無いと
     // resume() の Promise は解決せず、**デコードも分離も始まらないまま固まる**
     // （実測: ctxState=suspended のまま「読み込み中」で停止）。
