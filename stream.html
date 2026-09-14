@@ -93,6 +93,7 @@
       <button id="start" disabled>分離して再生する</button>
       <button id="stop" class="sec" disabled>停止</button>
       <label><input type="checkbox" id="is3d" checked> 立体音響</label>
+      <label title="分離が追いつかない端末では途中で止まります"><input type="checkbox" id="hurry"> 早く鳴らす（途中で止まることあり）</label>
     </div>
     <p class="note" id="prep"></p>
     <p class="note" id="envNote"></p>
@@ -514,6 +515,12 @@ function requiredLead() {
   // R≤1（実時間より速い）なら、再生中もバッファは増え続けるので余裕は要らない。
   // ここで MARGIN を足すと下限が 8秒 になり、1チャンク(5.85秒)で始められなくなる。
   // 余裕が意味を持つのは R>1（貯めた分を食いつぶす）ときだけ。
+  // 「早く鳴らす」: 理屈のうえでは足りなくても、1チャンク貯まったら始める。
+  // R>1 の端末では途中で止まって貯め直すことになるが、80秒待つより
+  // 「まず聴ける」ほうがよい場合がある。止まった回数ぶんは自動で先読みを増やす。
+  if ($('hurry').checked) {
+    return MIN_LEAD_SEC * (1 + Math.max(0, S.starving));
+  }
   const need = S.rate <= 1 ? 0 : S.songLen * (1 - 1 / S.rate) + MARGIN_SEC;
   const grow = 1 + 0.5 * Math.max(0, S.starving - 2); // 3回目以降のスタベーションで増やす
   return Math.max(need * grow, MIN_LEAD_SEC);
@@ -548,9 +555,10 @@ function updateStats() {
     : `${Math.max(0, S.separated - played).toFixed(1)} 秒`;
 
   if (S.playStartAt == null && S.rate) {
-    const remain = (S.leadSec - S.separated) * S.rate;
+    const remain = (requiredLead() - S.separated) * S.rate;
     $('eta').textContent = remain > 0 ? `約 ${fmt(remain)}` : 'まもなく';
   }
+  if (S.starving > 0) $('phase').title = `貯め直し ${S.starving} 回`;
 }
 
 function playedSec() {
@@ -673,39 +681,45 @@ function warmUp(worker, useGpu, threads) {
   });
 }
 
-function startPrep() {
+// 暖機は **ページを開いた瞬間に1回だけ**。
+// 以前はファイル選択のたびにワーカーを作り直していたため、曲を変えるたびに
+// 暖機をやり直していた（実測で毎回25秒）。ワーカーを使い回せば1回で済む。
+// ※ 作り直しが要るのは「停止した（terminate した）」ときと「GPU/スレッドを変えた」とき。
+function ensureWarmWorker() {
+  const key = prepKey();
+  if (P.worker && P.key === key && P.ready) return P.ready;   // もう温まっている
+  if (P.worker) { P.worker.terminate(); P.worker = null; }
+
+  P.key = key;
+  P.worker = new Worker('separator-worker.js', { type: 'module' });
+  P.ready = warmUp(P.worker, $('useGpu').checked, Number($('threads').value) || 1);
+  return P.ready;
+}
+
+// デコードだけはファイルごとに要る（曲の中身に依存するため）
+function startDecode() {
   const file = $('file').files[0];
   if (!file) return;
-  const key = prepKey();
-  // 設定が変わったら作り直す。※ threads だけの変更では ensureProcessor が
-  // セッションを作り直さないため、ワーカーごと捨てる必要がある。
-  if (P.worker && P.key !== key) { P.worker.terminate(); P.worker = null; }
-  if (P.worker && P.file === file) return;    // 同じ条件なら何もしない
-
-  P.file = file; P.key = key; P.decoded = null;
-  setPrep('warming', '準備中…');
-
-  // デコードも先にやっておく（1秒ぶん）
+  if (P.file === file && P.decoded) return;
+  P.file = file;
   const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
   P.decoded = file.arrayBuffer()
     .then(b => ctx.decodeAudioData(b))
     .then(d => { ctx.close(); return d; })
     .catch(e => { ctx.close(); throw e; });
-  P.decoded.catch(() => {});   // ここでは握るだけ。失敗は開始時に知らせる
-
-  if (!P.worker) P.worker = new Worker('separator-worker.js', { type: 'module' });
-  const useGpu = $('useGpu').checked;
-  const threads = Number($('threads').value) || 1;
-  P.ready = warmUp(P.worker, useGpu, threads);
+  P.decoded.catch(() => {});
 }
 
 $('file').addEventListener('change', () => {
   $('start').disabled = !$('file').files[0];
-  startPrep();
+  startDecode();
 });
 // 設定を変えたら温め直す（古いセッションのままでは反映されないため）
-$('useGpu').addEventListener('change', startPrep);
-$('threads').addEventListener('change', startPrep);
+$('useGpu').addEventListener('change', () => ensureWarmWorker());
+$('threads').addEventListener('change', () => ensureWarmWorker());
+
+// ページを開いた時点で温め始める
+ensureWarmWorker();
 
 $('start').addEventListener('click', async () => {
   const file = $('file').files[0];
@@ -731,8 +745,8 @@ $('start').addEventListener('click', async () => {
     // 分離は音を出さないので、鳴らす直前まで resume を待つ必要がない。
     S.audioCtx.resume().catch(() => {});
 
-    // ファイル選択時にデコードを始めてある。まだなら（設定変更直後など）ここで行う。
-    if (!P.decoded || P.file !== file) { startPrep(); }
+    // ファイル選択時にデコードを始めてある。まだならここで行う。
+    if (!P.decoded || P.file !== file) { startDecode(); }
     const decoded = await P.decoded;
     const left  = decoded.getChannelData(0);
     const right = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : decoded.getChannelData(0);
@@ -746,15 +760,15 @@ $('start').addEventListener('click', async () => {
       $('phase').textContent = '準備中';
       log('モデルの準備が終わるのを待っています…');
     }
-    const warmed = P.ready ? await P.ready : false;
+    const warmed = await ensureWarmWorker();
     if (!S.running) return;            // 待っている間に停止された
     S.warmed = warmed;
     log(warmed ? 'モデルの準備が完了しています（暖機済み）' : 'モデルの準備ができていません。通常どおり進めます', warmed ? 'ok' : 'warn');
 
-    // 温めた Worker をそのまま使う（別ワーカーでは暖機の効果が無い）
-    S.worker = P.worker || new Worker('separator-worker.js', { type: 'module' });
-    P.worker = null;                   // 本番へ引き渡す。次のファイル選択で作り直す
-    P.ready = null; setPrep('idle', '');
+    // 温めた Worker を **使い回す**（terminate しない限り温かいまま）。
+    // 以前はここで P.worker を null にして本番へ引き渡していたため、
+    // 次の曲でまた最初から温め直していた。
+    S.worker = P.worker;
     S.sepStartAt = performance.now();
     let lastChunkAt = S.sepStartAt;
 
@@ -791,6 +805,7 @@ $('start').addEventListener('click', async () => {
 
       } else if (m.type === 'done') {
         S.done = true;
+        setPrep('ready', '準備完了。次の曲もすぐ始められます');
         log(`分離完了（実時間 ${((performance.now() - S.sepStartAt) / 1000).toFixed(1)}秒 / R=${S.rate?.toFixed(2)}）`, 'ok');
         tryStartPlayback();
 
@@ -830,16 +845,18 @@ $('start').addEventListener('click', async () => {
 
 function stopAll() {
   S.running = false;
+  // 走っている分離を止める手段は terminate しかない。温かさは失われるので、
+  // このあと裏で温め直しておく（次に押したときに待たせないため）。
   if (S.worker) { S.worker.terminate(); S.worker = null; }
-  if (P.worker) { P.worker.terminate(); P.worker = null; }
-  P.ready = null; P.file = null; P.decoded = null; setPrep('idle', '');
+  if (P.worker) { P.worker.terminate(); }
+  P.worker = null; P.ready = null;
   if (S.audioCtx) { S.audioCtx.close(); S.audioCtx = null; }
   S.stems = null; S.playStartAt = null;
   $('phase').textContent = '停止';
   $('start').disabled = !$('file').files[0];
   $('stop').disabled = true;
 }
-$('stop').addEventListener('click', () => { log('停止しました'); stopAll(); });
+$('stop').addEventListener('click', () => { log('停止しました'); stopAll(); ensureWarmWorker(); });
 
 setInterval(() => { if (S.running) { updateStats(); watchdog(); } }, 250);
 
