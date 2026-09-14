@@ -222,6 +222,7 @@ const S = {
   leadSec: MIN_LEAD_SEC,
   running: false, done: false,
   warmed: false,       // 事前に暖機してから本番を始めたか
+  hurryHinted: false,  // 「早く鳴らす」の案内を出したか（1回だけ）
 };
 
 /* ---------- スレッド数 ---------------------------------------------------
@@ -252,11 +253,20 @@ function setupThreadSelect() {
 setupThreadSelect();
 
 /* ---------- 環境の表示 -------------------------------------------------- */
-(async function env() {
+const ENV = { gpu: null, coi: self.crossOriginIsolated, cores: navigator.hardwareConcurrency || null,
+              adapter: null, ready: null };
+
+ENV.ready = (async function env() {
   const parts = [];
   parts.push(`crossOriginIsolated: ${self.crossOriginIsolated ? 'true' : 'false'}`);
   let gpu = false;
-  try { gpu = !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch { gpu = false; }
+  try {
+    const ad = navigator.gpu && await navigator.gpu.requestAdapter();
+    gpu = !!ad;
+    // どのGPUが見えているかを控える（遅い原因の切り分けに使う）
+    if (ad && ad.info) ENV.adapter = `${ad.info.vendor || ''} ${ad.info.architecture || ''}`.trim();
+  } catch { gpu = false; }
+  ENV.gpu = gpu;
   parts.push(`WebGPU: ${gpu ? '利用可' : '非対応'}`);
   parts.push(`論理コア: ${navigator.hardwareConcurrency || '不明'}`);
   $('useGpu').disabled = !gpu;
@@ -271,6 +281,7 @@ setupThreadSelect();
     note.innerHTML += '<br><span class="warn">WebGPU が使えないため CPU で分離します。'
       + '再生開始までの待ち時間が長くなります（曲長と端末性能しだい）。</span>';
   }
+  return gpu;
 })();
 
 /* ---------- 音声グラフ -------------------------------------------------- */
@@ -493,6 +504,10 @@ $('reset').addEventListener('click', () => {
 
 buildDots();
 
+$('hurry').addEventListener('change', () => {
+  if (S.running && S.playStartAt == null) { tryStartPlayback(); updateStats(); }
+});
+
 $('is3d').addEventListener('change', () => {
   if (!S.stems || !S.audioCtx) return;
   const on = $('is3d').checked, t = S.audioCtx.currentTime;
@@ -557,6 +572,13 @@ function updateStats() {
   if (S.playStartAt == null && S.rate) {
     const remain = (requiredLead() - S.separated) * S.rate;
     $('eta').textContent = remain > 0 ? `約 ${fmt(remain)}` : 'まもなく';
+    // 待ちが長くなると分かった時点で、選べることを一度だけ知らせる
+    if (remain > 30 && !S.hurryHinted && !$('hurry').checked) {
+      S.hurryHinted = true;
+      log(`この端末では分離が実時間の ${S.rate.toFixed(2)} 倍かかるため、`
+        + `途切れずに流すには あと約${fmt(remain)} 必要です。`
+        + `すぐ聴きたい場合は「早く鳴らす」にチェックを入れてください（途中で止まります）`, 'warn');
+    }
   }
   if (S.starving > 0) $('phase').title = `貯め直し ${S.starving} 回`;
 }
@@ -718,8 +740,11 @@ $('file').addEventListener('change', () => {
 $('useGpu').addEventListener('change', () => ensureWarmWorker());
 $('threads').addEventListener('change', () => ensureWarmWorker());
 
-// ページを開いた時点で温め始める
-ensureWarmWorker();
+// ページを開いた時点で温め始める。
+// **WebGPU の判定（非同期）を待ってから**でなければならない。待たずに始めると、
+// GPU が使える端末でも「チェックがまだ入っていない」状態で CPU セッションを
+// 温めてしまい、クリック時に作り直しになって下ごしらえが無駄になる。
+ENV.ready.then(() => ensureWarmWorker());
 
 $('start').addEventListener('click', async () => {
   const file = $('file').files[0];
@@ -729,7 +754,7 @@ $('start').addEventListener('click', async () => {
   Object.assign(S, {
     songLen: 0, separated: 0, rate: null, rateSamples: [], chunkCount: 0,
     playStartAt: null, pending: [], starving: 0, leadSec: MIN_LEAD_SEC,
-    running: true, done: false, warmed: false
+    running: true, done: false, warmed: false, hurryHinted: false
   });
 
   try {
@@ -780,7 +805,16 @@ $('start').addEventListener('click', async () => {
         const names = { loadmodel: 'モデル読み込み', cachehit: 'モデル読み込み（キャッシュ）',
                         resample: 'サンプリング変換', separate: '分離中' };
         $('phase').textContent = names[m.phase] || m.phase;
-        if (m.phase === 'separate') { S.sepStartAt = performance.now(); lastChunkAt = S.sepStartAt; }
+        if (m.phase === 'separate') {
+          S.sepStartAt = performance.now(); lastChunkAt = S.sepStartAt;
+          // 遅い原因を切り分けられるよう、実際に使っている条件を必ず残す
+          log(`環境: ${ENV.gpu ? 'WebGPU利用可' : 'WebGPU非対応'}`
+            + ` / 実行=${$('useGpu').checked ? 'GPU' : 'CPU'}`
+            + ` / スレッド=${$('threads').value}`
+            + ` / コア=${ENV.cores ?? '不明'}`
+            + ` / COI=${ENV.coi}`
+            + (ENV.adapter ? ` / GPU=${ENV.adapter}` : ''));
+        }
         log(`フェーズ: ${names[m.phase] || m.phase}`);
 
       } else if (m.type === 'download') {
