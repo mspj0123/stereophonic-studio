@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>先読みストリーミング再生（試験）｜立体音響スタジオ</title>
+<!-- クロスオリジン分離を静的ホスト(GitHub Pages)で有効化（SharedArrayBuffer用・MIT） -->
+<script src="coi-serviceworker.js"></script>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#2a323d; --fg:#e6edf3; --muted:#8b949e;
+    --accent:#4d9fff; --ok:#3fb950; --warn:#d29922; --err:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.7 system-ui,-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif}
+  .wrap{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        padding:16px;margin-bottom:16px}
+  .card h2{font-size:15px;margin:0 0 12px;font-weight:600}
+  button{background:var(--accent);color:#fff;border:0;border-radius:6px;
+         padding:9px 16px;font-size:14px;cursor:pointer}
+  button:disabled{background:#30363d;color:#6e7681;cursor:not-allowed}
+  button.sec{background:#21262d;border:1px solid var(--line);color:var(--fg)}
+  label{display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--muted)}
+  input[type=file]{color:var(--muted)}
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .bar{height:8px;background:#0b0e13;border-radius:4px;overflow:hidden;margin:8px 0}
+  .bar>i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+  .bar>i.play{background:var(--ok)}
+  .stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .stat div{background:#0b0e13;border-radius:6px;padding:8px 10px}
+  .stat b{display:block;color:var(--muted);font-size:11px;font-weight:500}
+  .stat span{font-size:15px;font-variant-numeric:tabular-nums}
+  #log{background:#0b0e13;border-radius:6px;padding:10px;max-height:180px;overflow:auto;
+       font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);
+       white-space:pre-wrap;word-break:break-all}
+  .stems{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+  .stem{background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:10px}
+  .stem h3{margin:0 0 6px;font-size:13px}
+  .stem input[type=range]{width:100%}
+  .note{color:var(--muted);font-size:12px;margin-top:8px}
+  .err{color:var(--err)} .warn{color:var(--warn)} .ok{color:var(--ok)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;
+        background:#21262d;color:var(--muted);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>先読みストリーミング再生 <span class="pill">試験ページ</span></h1>
+  <p class="sub">
+    分離が終わるのを待たずに、<strong>追いついた分から立体音響で再生</strong>します。
+    このページは既存のプレイヤーとは独立していて、互いに影響しません。
+  </p>
+
+  <div class="card">
+    <h2>1. 曲を選ぶ</h2>
+    <div class="row">
+      <input type="file" id="file" accept="audio/*">
+      <label><input type="checkbox" id="useGpu"> WebGPU を使う（対応端末のみ・高速）</label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="start" disabled>分離して再生する</button>
+      <button id="stop" class="sec" disabled>停止</button>
+      <label><input type="checkbox" id="is3d" checked> 立体音響</label>
+    </div>
+    <p class="note" id="envNote"></p>
+  </div>
+
+  <div class="card">
+    <h2>2. 進み具合</h2>
+    <div class="stat">
+      <div><b>状態</b><span id="phase">待機中</span></div>
+      <div><b>分離速度 R</b><span id="rate">—</span></div>
+      <div><b>再生開始まで</b><span id="eta">—</span></div>
+      <div><b>先読み（未再生）</b><span id="lead">—</span></div>
+    </div>
+    <div class="bar"><i id="sepBar"></i></div>
+    <div class="bar"><i id="playBar" class="play"></i></div>
+    <p class="note">
+      上＝分離の進み／下＝再生位置。<strong>R は「音1秒あたりの分離にかかる秒数」</strong>で、
+      1未満なら実時間より速い。1を超えていても、その分だけ先読みすれば途切れずに再生できます。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>3. パート</h2>
+    <div class="stems" id="stems"></div>
+  </div>
+
+  <div class="card">
+    <h2>ログ</h2>
+    <div id="log"></div>
+  </div>
+
+</div>
+
+<script type="module">
+/* =========================================================================
+   先読みストリーミング再生
+   設計: docs/design/先読みストリーミング再生設計.md
+
+   既存の separator-worker.js / vendor/demucs-web は無改変で再利用する。
+   このファイルは index.html / player.html に一切依存しない（相互に影響させない）。
+   ========================================================================= */
+
+const SAMPLE_RATE   = 44100;
+const MIN_LEAD_SEC  = 12;    // 最低でもこれだけは貯めてから鳴らす（チャンク約2つ分）
+const SAFETY        = 1.15;  // 分離が15%遅くなっても耐えるための安全率
+const LEAD_WARN_SEC = 120;   // これを超える先読みはメモリ警告を出す
+
+// 既定の定位。聴取者は原点、正面が -Z。
+const LAYOUT = {
+  vocals: { x: 0,  y: 0, z: -2, label: 'ボーカル' },
+  drums : { x: 0,  y: 1, z:  2, label: 'ドラム'   },
+  bass  : { x: -2, y: 0, z:  0, label: 'ベース'   },
+  other : { x: 2,  y: 0, z:  0, label: 'その他'   },
+};
+const TRACKS = ['drums', 'bass', 'other', 'vocals'];
+
+const $ = (id) => document.getElementById(id);
+const fmt = (s) => (s == null || !isFinite(s)) ? '—'
+  : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+function log(msg, cls) {
+  const el = $('log');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `${new Date().toLocaleTimeString('ja-JP')}  ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+/* ---------- 状態 ------------------------------------------------------- */
+const S = {
+  audioCtx: null, worker: null, stems: null, master: null,
+  songLen: 0,          // 曲の長さ(秒)
+  separated: 0,        // 分離済みの長さ(秒)
+  sepStartAt: 0,       // 分離を始めた時刻(performance.now)
+  rate: null,          // R（実測）
+  playStartAt: null,   // 再生開始時の audioCtx.currentTime
+  pending: [],         // 未予約のチャンク
+  starving: 0,         // スタベーション回数
+  leadSec: MIN_LEAD_SEC,
+  running: false, done: false,
+};
+
+/* ---------- 環境の表示 -------------------------------------------------- */
+(async function env() {
+  const parts = [];
+  parts.push(`crossOriginIsolated: ${self.crossOriginIsolated ? 'true' : 'false'}`);
+  let gpu = false;
+  try { gpu = !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch { gpu = false; }
+  parts.push(`WebGPU: ${gpu ? '利用可' : '非対応'}`);
+  parts.push(`論理コア: ${navigator.hardwareConcurrency || '不明'}`);
+  $('useGpu').disabled = !gpu;
+  if (gpu) $('useGpu').checked = true;
+  const note = $('envNote');
+  note.textContent = parts.join(' / ');
+  if (!self.crossOriginIsolated) {
+    note.innerHTML += '<br><span class="warn">クロスオリジン分離が無効です。'
+      + 'スレッドが使えず分離が遅くなります（再読み込みで有効になることがあります）。</span>';
+  }
+  if (!gpu) {
+    note.innerHTML += '<br><span class="warn">WebGPU が使えないため CPU で分離します。'
+      + '再生開始までの待ち時間が長くなります（曲長と端末性能しだい）。</span>';
+  }
+})();
+
+/* ---------- 音声グラフ -------------------------------------------------- */
+function buildGraph() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+  const master = ctx.createGain();
+  master.gain.value = 0.9;
+  master.connect(ctx.destination);
+
+  if (ctx.listener.forwardX) {
+    ctx.listener.forwardX.value = 0; ctx.listener.forwardY.value = 0; ctx.listener.forwardZ.value = -1;
+    ctx.listener.upX.value = 0;      ctx.listener.upY.value = 1;      ctx.listener.upZ.value = 0;
+  }
+
+  const is3D = $('is3d').checked;
+  const stems = {};
+  for (const name of TRACKS) {
+    const pos = LAYOUT[name];
+
+    const volumeGain = ctx.createGain();
+    volumeGain.gain.value = 1;
+
+    const directGain = ctx.createGain();
+    directGain.gain.value = is3D ? 0 : 1;
+
+    // 既存プレイヤー（index.html）と同じパラメータにそろえる
+    const panner = new PannerNode(ctx, {
+      panningModel: 'HRTF', distanceModel: 'inverse',
+      refDistance: 1.5, maxDistance: 20, rolloffFactor: 0.5,
+      coneInnerAngle: 360, coneOuterAngle: 360, coneOuterGain: 1
+    });
+    panner.positionX.value = pos.x;
+    panner.positionY.value = pos.y;
+    panner.positionZ.value = pos.z;
+
+    const airLPF = ctx.createBiquadFilter();
+    airLPF.type = 'lowpass';
+    airLPF.frequency.value = 12000;
+    airLPF.Q.value = 0.5;
+
+    const threeDGain = ctx.createGain();
+    threeDGain.gain.value = is3D ? 1 : 0;
+
+    volumeGain.connect(directGain).connect(master);
+    volumeGain.connect(panner);
+    panner.connect(airLPF);
+    airLPF.connect(threeDGain).connect(master);
+
+    stems[name] = { volumeGain, directGain, panner, airLPF, threeDGain, muted: false };
+  }
+  return { ctx, master, stems };
+}
+
+function renderStems() {
+  const box = $('stems');
+  box.innerHTML = '';
+  for (const name of TRACKS) {
+    const pos = LAYOUT[name];
+    const el = document.createElement('div');
+    el.className = 'stem';
+    el.innerHTML = `
+      <h3>${pos.label}</h3>
+      <label><input type="checkbox" data-mute="${name}" checked> 鳴らす</label>
+      <input type="range" data-vol="${name}" min="0" max="150" value="100">
+      <div class="note">x:${pos.x} y:${pos.y} z:${pos.z}</div>`;
+    box.appendChild(el);
+  }
+  box.addEventListener('input', (e) => {
+    const t = e.target;
+    if (!S.stems) return;
+    if (t.dataset.vol) {
+      const s = S.stems[t.dataset.vol];
+      if (s && !s.muted) s.volumeGain.gain.value = Number(t.value) / 100;
+    }
+  });
+  box.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!S.stems || !t.dataset.mute) return;
+    const s = S.stems[t.dataset.mute];
+    if (!s) return;
+    s.muted = !t.checked;
+    const vol = box.querySelector(`[data-vol="${t.dataset.mute}"]`);
+    s.volumeGain.gain.value = s.muted ? 0 : Number(vol.value) / 100;
+  });
+}
+renderStems();
+
+$('is3d').addEventListener('change', () => {
+  if (!S.stems || !S.audioCtx) return;
+  const on = $('is3d').checked, t = S.audioCtx.currentTime;
+  for (const name of TRACKS) {
+    S.stems[name].directGain.gain.setTargetAtTime(on ? 0 : 1, t, 0.03);
+    S.stems[name].threeDGain.gain.setTargetAtTime(on ? 1 : 0, t, 0.03);
+  }
+});
+
+/* ---------- 先読み量の計算（この機能の心臓部） -------------------------- */
+//   再生が終わる前に分離が終わる条件:  L >= (L - d) * R
+//   これを d について解くと            d >= L * (1 - 1/R)
+//   R <= 1 なら右辺は0以下＝最初のチャンクだけで足りる。
+function requiredLead() {
+  if (!S.rate || !S.songLen) return MIN_LEAD_SEC;
+  const rSafe = S.rate * SAFETY;
+  const need = rSafe <= 1 ? 0 : S.songLen * (1 - 1 / rSafe);
+  const grow = 1 + 0.5 * Math.max(0, S.starving - 2); // 3回目以降のスタベーションで増やす
+  return Math.max(need * grow, MIN_LEAD_SEC);
+}
+
+function updateStats() {
+  $('rate').textContent = S.rate ? `${S.rate.toFixed(2)} ×` : '測定中…';
+  $('sepBar').style.width = S.songLen ? `${(S.separated / S.songLen) * 100}%` : '0';
+
+  const played = playedSec();
+  $('playBar').style.width = S.songLen ? `${(played / S.songLen) * 100}%` : '0';
+  $('lead').textContent = S.playStartAt == null ? '—'
+    : `${Math.max(0, S.separated - played).toFixed(1)} 秒`;
+
+  if (S.playStartAt == null && S.rate) {
+    const remain = (S.leadSec - S.separated) * S.rate;
+    $('eta').textContent = remain > 0 ? `約 ${fmt(remain)}` : 'まもなく';
+  }
+}
+
+function playedSec() {
+  if (S.playStartAt == null || !S.audioCtx) return 0;
+  return Math.min(S.songLen, Math.max(0, S.audioCtx.currentTime - S.playStartAt));
+}
+
+/* ---------- チャンクの予約 ---------------------------------------------- */
+function scheduleChunk(chunk) {
+  const { offset, length, tracks } = chunk;
+  const when = S.playStartAt + offset / SAMPLE_RATE;
+
+  // すでに時刻を過ぎているものは捨てる（届くのが遅れた場合の保険）
+  if (when + length / SAMPLE_RATE <= S.audioCtx.currentTime) {
+    log(`チャンク offset=${offset} は時刻を過ぎたため破棄`, 'warn');
+    return;
+  }
+
+  for (const name of TRACKS) {
+    const tr = tracks[name];
+    if (!tr) continue;
+    const buf = S.audioCtx.createBuffer(2, length, SAMPLE_RATE);
+    buf.copyToChannel(tr.left, 0);
+    buf.copyToChannel(tr.right, 1);
+    const src = S.audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(S.stems[name].volumeGain);
+    // 再生が済んだら参照を切る（曲全長ぶんを抱えない）
+    src.onended = () => { try { src.disconnect(); } catch {} src.buffer = null; };
+    src.start(Math.max(when, S.audioCtx.currentTime));
+  }
+}
+
+function tryStartPlayback() {
+  if (S.playStartAt != null || !S.rate) return;
+  S.leadSec = requiredLead();
+
+  if (S.leadSec > LEAD_WARN_SEC) {
+    log(`先読みが ${S.leadSec.toFixed(0)} 秒必要です。メモリを多く使います`, 'warn');
+  }
+  if (S.separated < S.leadSec && !S.done) return;
+
+  // 予約の基準時刻。少し余裕を持たせてから鳴らし始める
+  S.playStartAt = S.audioCtx.currentTime + 0.15;
+  $('phase').textContent = '再生中';
+  log(`再生開始（先読み ${S.separated.toFixed(1)}秒 / 必要 ${S.leadSec.toFixed(1)}秒）`, 'ok');
+  for (const c of S.pending) scheduleChunk(c);
+  S.pending.length = 0;
+}
+
+/* ---------- スタベーション監視 ------------------------------------------ */
+function watchdog() {
+  if (!S.running || S.playStartAt == null || S.done) return;
+  const played = playedSec();
+  const buffered = S.separated - played;
+
+  if (buffered <= 0.3 && played < S.songLen - 0.5) {
+    S.starving++;
+    log(`分離が追いつきませんでした（${S.starving}回目）。貯め直します`, 'warn');
+    $('phase').textContent = 'バッファ中';
+    S.audioCtx.suspend();
+    const need = requiredLead();
+    const iv = setInterval(() => {
+      if (!S.running) { clearInterval(iv); return; }
+      if (S.separated - played >= need || S.done) {
+        clearInterval(iv);
+        S.audioCtx.resume();
+        $('phase').textContent = '再生中';
+        log('再生を再開しました', 'ok');
+      }
+    }, 250);
+  }
+}
+
+/* ---------- 本体 --------------------------------------------------------- */
+$('file').addEventListener('change', () => { $('start').disabled = !$('file').files[0]; });
+
+$('start').addEventListener('click', async () => {
+  const file = $('file').files[0];
+  if (!file) return;
+  $('start').disabled = true; $('stop').disabled = false;
+  $('log').innerHTML = '';
+  Object.assign(S, {
+    songLen: 0, separated: 0, rate: null, playStartAt: null,
+    pending: [], starving: 0, leadSec: MIN_LEAD_SEC, running: true, done: false
+  });
+
+  try {
+    $('phase').textContent = '読み込み中';
+    log(`ファイル: ${file.name}（${(file.size / 1024 / 1024).toFixed(1)}MB）`);
+
+    const g = buildGraph();
+    S.audioCtx = g.ctx; S.master = g.master; S.stems = g.stems;
+    await S.audioCtx.resume();
+
+    const decoded = await S.audioCtx.decodeAudioData(await file.arrayBuffer());
+    const left  = decoded.getChannelData(0);
+    const right = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : decoded.getChannelData(0);
+    S.songLen = decoded.duration;
+    log(`長さ ${fmt(decoded.duration)} / ${decoded.sampleRate}Hz / ${decoded.numberOfChannels}ch`);
+
+    // 既存 Worker をそのまま使う（無改変）
+    S.worker = new Worker('separator-worker.js', { type: 'module' });
+    S.sepStartAt = performance.now();
+    let lastChunkAt = S.sepStartAt;
+
+    // 再試行のときに同じ実装を付け直せるよう、名前を付けて持っておく
+    //（モジュールは strict モードなので arguments.callee は使えない）
+    const onWorkerMessage = (e) => {
+      const m = e.data || {};
+      if (m.type === 'phase') {
+        const names = { loadmodel: 'モデル読み込み', cachehit: 'モデル読み込み（キャッシュ）',
+                        resample: 'サンプリング変換', separate: '分離中' };
+        $('phase').textContent = names[m.phase] || m.phase;
+        if (m.phase === 'separate') { S.sepStartAt = performance.now(); lastChunkAt = S.sepStartAt; }
+        log(`フェーズ: ${names[m.phase] || m.phase}`);
+
+      } else if (m.type === 'download') {
+        $('phase').textContent = `モデル取得 ${(m.loaded / 1024 / 1024).toFixed(0)}/${(m.total / 1024 / 1024).toFixed(0)}MB`;
+
+      } else if (m.type === 'meta') {
+        log(`分離対象 ${(m.totalSamples / m.sampleRate).toFixed(1)} 秒`);
+
+      } else if (m.type === 'chunk') {
+        const now = performance.now();
+        const audioSec = m.length / SAMPLE_RATE;
+        const wallSec = (now - lastChunkAt) / 1000;
+        lastChunkAt = now;
+
+        // R を移動平均で更新（最初の1個は丸ごと採用）
+        const r = wallSec / audioSec;
+        S.rate = S.rate == null ? r : (S.rate * 0.7 + r * 0.3);
+        S.separated = (m.offset + m.length) / SAMPLE_RATE;
+
+        if (S.playStartAt == null) S.pending.push(m);
+        else scheduleChunk(m);
+        tryStartPlayback();
+        updateStats();
+
+      } else if (m.type === 'done') {
+        S.done = true;
+        log(`分離完了（実時間 ${((performance.now() - S.sepStartAt) / 1000).toFixed(1)}秒 / R=${S.rate?.toFixed(2)}）`, 'ok');
+        tryStartPlayback();
+
+      } else if (m.type === 'error') {
+        log(`エラー: ${m.message}`, 'err');
+        if (m.usedGpu) {
+          log('WebGPU で失敗したため CPU に切り替えて再試行します', 'warn');
+          $('useGpu').checked = false;
+          S.worker.terminate();
+          S.worker = new Worker('separator-worker.js', { type: 'module' });
+          S.worker.onmessage = onWorkerMessage;
+          S.rate = null; S.separated = 0; S.pending.length = 0;
+          S.worker.postMessage({ type: 'separate', left, right,
+            sampleRate: decoded.sampleRate, useGpu: false,
+            threads: Math.min(4, navigator.hardwareConcurrency || 1) });
+        } else {
+          stopAll();
+        }
+      }
+    };
+
+    S.worker.onmessage = onWorkerMessage;
+    S.worker.postMessage({
+      type: 'separate',
+      left, right,
+      sampleRate: decoded.sampleRate,
+      useGpu: $('useGpu').checked,
+      threads: Math.min(4, navigator.hardwareConcurrency || 1)
+    });
+
+  } catch (err) {
+    log(`失敗: ${err && err.message ? err.message : err}`, 'err');
+    stopAll();
+  }
+});
+
+function stopAll() {
+  S.running = false;
+  if (S.worker) { S.worker.terminate(); S.worker = null; }
+  if (S.audioCtx) { S.audioCtx.close(); S.audioCtx = null; }
+  S.stems = null; S.playStartAt = null;
+  $('phase').textContent = '停止';
+  $('start').disabled = !$('file').files[0];
+  $('stop').disabled = true;
+}
+$('stop').addEventListener('click', () => { log('停止しました'); stopAll(); });
+
+setInterval(() => { if (S.running) { updateStats(); watchdog(); } }, 250);
+
+// テストから状態を覗くための口（本番の動作には影響しない）
+window.__stream = S;
+window.__requiredLead = requiredLead;
+</script>
+</body>
+</html>
