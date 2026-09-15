@@ -55,7 +55,9 @@
     </div>
 
     <div class="lvl"><i id="lvl"></i></div>
+    <p class="note" id="lvlText">いまの音量 —</p>
     <p class="note" id="srcNote">まだ取り込んでいません</p>
+    <p class="note" id="diag"></p>
 
     <div class="warnbox">
       <b>お使いになる前に。</b>
@@ -106,7 +108,7 @@ const $ = (id) => document.getElementById(id);
 
 let stream = null, ctx = null, node = null, srcNode = null, analyser = null;
 let recording = false, parts = [], total = 0, recStartAt = 0, captured = null;
-let silentTimer = null;
+let silentTimer = null, peakSeen = 0, lastLvlAt = 0;
 
 // 生のPCMを集めるための AudioWorklet。別ファイルにせず Blob で持つ。
 const WORKLET = `
@@ -157,8 +159,17 @@ async function attach(newStream, label) {
   analyser.fftSize = 1024;
   srcNode.connect(analyser);
   srcNode.connect(node);
-  // 取り込んだ音はここでは鳴らさない（元の音とハウリング・二重再生になるため）
-  node.connect(ctx.createGain());   // 出力には繋がない
+
+  // 【重要】Web Audio は **出力（destination）に繋がった経路しか処理しない**。
+  // 「鳴らしたくないから出力に繋がない」とすると、グラフごと動かず、
+  // AudioWorklet の process() もアナライザーも呼ばれない
+  //（＝レベル計が動かず、録音も0サンプルになる）。
+  // そこで **音量0のゲインを挟んで出力に繋ぐ**。これで処理は走るが音は出ない。
+  const sink = ctx.createGain();
+  sink.gain.value = 0;
+  node.connect(sink);
+  analyser.connect(sink);
+  sink.connect(ctx.destination);
 
   // 取り込み元が止められたら（タブを閉じた等）片付ける
   for (const t of stream.getTracks()) t.onended = () => { setSrcNote('取り込み元が終了しました', 'warn'); detach(); };
@@ -166,6 +177,11 @@ async function attach(newStream, label) {
   // 何が取り込めているのかを必ず残す。「動かない」を推測で切り分けないため。
   const at = stream.getAudioTracks()[0];
   const st = at && at.getSettings ? at.getSettings() : {};
+  const diagText = `取り込み開始: ${label}`
+    + ` / 音声トラック=${stream.getAudioTracks().length}`
+    + ` / 状態=${stream.getAudioTracks()[0]?.readyState ?? '-'}`
+    + ` / 取り込みctx=${ctx.state}`;
+  $('diag').textContent = diagText;
   engineLog(`取り込み開始: ${label}`
     + ` / 音声トラック=${stream.getAudioTracks().length}`
     + ` / 名前="${at ? at.label : 'なし'}"`
@@ -196,6 +212,7 @@ function detach() {
 // レベル表示。無音（DRM遮断など）をその場で気づけるようにする。
 function meter() {
   const buf = new Float32Array(1024);
+  peakSeen = 0;
   const tick = () => {
     if (!analyser) return;
     analyser.getFloatTimeDomainData(buf);
@@ -204,6 +221,14 @@ function meter() {
     const el = $('lvl');
     el.style.width = Math.min(100, peak * 140) + '%';
     el.className = peak > 0.95 ? 'hot' : '';
+    if (peak > peakSeen) peakSeen = peak;
+    const now = performance.now();
+    if (now - lastLvlAt > 200) {
+      lastLvlAt = now;
+      $('lvlText').textContent =
+        `いまの音量 ${(peak * 100).toFixed(0)}% ／ これまでの最大 ${(peakSeen * 100).toFixed(0)}%`
+        + `（取り込み状態: ${ctx ? ctx.state : '未接続'}）`;
+    }
     requestAnimationFrame(tick);
   };
   tick();
