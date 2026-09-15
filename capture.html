@@ -48,6 +48,10 @@
       <button id="useTab" class="sec">PCで鳴っている音を取り込む（タブ／画面を選ぶ）</button>
       <span class="note">共有画面で<b>「Chromeのタブ」</b>を選び、左下の<b>「タブの音声を共有」にチェック</b>を入れてください。
         <b>「ウィンドウ」では音を取れません</b>（Chromeの仕様）</span>
+      <div style="margin-top:8px">
+        <label><input type="checkbox" id="suppress" checked>
+          取り込み元の音をスピーカーから止める（<b>分離した音だけを聴く</b>）</label>
+      </div>
     </div>
 
     <div class="lvl"><i id="lvl"></i></div>
@@ -72,6 +76,11 @@
       <span id="recState" class="note">待機中</span>
     </div>
     <p class="note">上限は10分です。長いほど分離に時間がかかります。まずは1〜2分で試すことをおすすめします。</p>
+    <p class="note warn" id="loopWarn" hidden>
+      ⚠ ステレオミキサーのように「PCが鳴らしている音すべて」を拾う入力では、
+      <b>このページが鳴らす分離後の音まで拾ってしまいます</b>。
+      録音と再生を同時に行うとループします（いまは録り終えてから鳴らす作りなので問題ありません）。
+    </p>
   </div>
 
   <div class="card">
@@ -237,14 +246,22 @@ $('useDev').addEventListener('click', async () => {
                noiseSuppression: false, autoGainControl: false }
     });
     await attach(s, label);
+    // PCの出力を丸ごと拾う系の入力は、将来「流しっぱなし」にしたときループする
+    $('loopWarn').hidden = !/stereo\s*mix|ステレオ\s*ミキサー|monitor|モニター|what\s*u\s*hear/i.test(label);
   } catch (e) { setSrcNote(`取り込めませんでした: ${e.message}`, 'err'); }
 });
 
 $('useTab').addEventListener('click', async () => {
   try {
+    // suppressLocalAudioPlayback:
+    //   取り込んだ音を **スピーカーからは鳴らさず**、ストリームにだけ流す指定。
+    //   これが無いと「元の音」と「分離した音」が二重に聞こえる。
+    //   Chrome 105 以降のタブ共有で効く。効かない環境では下で applyConstraints を試す。
+    const suppress = $('suppress').checked;
     const s = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+               suppressLocalAudioPlayback: suppress }
     });
     if (!s.getAudioTracks().length) {
       for (const t of s.getTracks()) t.stop();
@@ -258,6 +275,25 @@ $('useTab').addEventListener('click', async () => {
       return;
     }
     for (const t of s.getVideoTracks()) t.stop();   // 映像は要らない
+
+    // 初期指定が通らなかった場合に備えて、後からも一度試す
+    const at0 = s.getAudioTracks()[0];
+    if (suppress && at0) {
+      const got = at0.getSettings ? at0.getSettings().suppressLocalAudioPlayback : undefined;
+      if (got !== true) {
+        try { await at0.applyConstraints({ suppressLocalAudioPlayback: true }); } catch {}
+      }
+      const after = at0.getSettings ? at0.getSettings().suppressLocalAudioPlayback : undefined;
+      if (after === true) {
+        engineLog('取り込み元の音をスピーカーから止めました（分離した音だけが鳴ります）', 'ok');
+      } else {
+        engineLog('この環境では取り込み元の音を止められませんでした。'
+          + '元の音と分離した音が二重に聞こえます。'
+          + '取り込み元のタブを Chrome のタブ右クリック →「サイトをミュート」しても、'
+          + '取り込み自体は続きます', 'warn');
+      }
+    }
+
     await attach(s, 'タブ／画面の音');
   } catch (e) { setSrcNote(`取り込めませんでした: ${e.message}`, 'err'); }
 });
