@@ -46,7 +46,8 @@
 
     <div>
       <button id="useTab" class="sec">PCで鳴っている音を取り込む（タブ／画面を選ぶ）</button>
-      <span class="note">Chromeの共有画面で<b>「タブの音声を共有」にチェック</b>を入れてください</span>
+      <span class="note">共有画面で<b>「Chromeのタブ」</b>を選び、左下の<b>「タブの音声を共有」にチェック</b>を入れてください。
+        <b>「ウィンドウ」では音を取れません</b>（Chromeの仕様）</span>
     </div>
 
     <div class="lvl"><i id="lvl"></i></div>
@@ -153,6 +154,21 @@ async function attach(newStream, label) {
   // 取り込み元が止められたら（タブを閉じた等）片付ける
   for (const t of stream.getTracks()) t.onended = () => { setSrcNote('取り込み元が終了しました', 'warn'); detach(); };
 
+  // 何が取り込めているのかを必ず残す。「動かない」を推測で切り分けないため。
+  const at = stream.getAudioTracks()[0];
+  const st = at && at.getSettings ? at.getSettings() : {};
+  engineLog(`取り込み開始: ${label}`
+    + ` / 音声トラック=${stream.getAudioTracks().length}`
+    + ` / 名前="${at ? at.label : 'なし'}"`
+    + ` / 状態=${at ? at.readyState : '-'}`
+    + `${at && at.muted ? ' / ミュート中' : ''}`
+    + `${st.sampleRate ? ` / ${st.sampleRate}Hz` : ''}`
+    + `${st.channelCount ? ` / ${st.channelCount}ch` : ''}`
+    + ` / 取り込みctx=${ctx.state}`, 'ok');
+  if (at && at.muted) {
+    engineLog('音声トラックがミュート状態です。共有の設定を見直してください', 'warn');
+  }
+
   setSrcNote(`取り込み中: ${label}`, 'ok');
   $('rec').disabled = false;
   meter();
@@ -232,7 +248,13 @@ $('useTab').addEventListener('click', async () => {
     });
     if (!s.getAudioTracks().length) {
       for (const t of s.getTracks()) t.stop();
-      setSrcNote('音声が共有されていません。共有画面で「タブの音声を共有」にチェックを入れてください', 'warn');
+      setSrcNote('音声が共有されていません', 'err');
+      // ここで詰まる原因はほぼ2つ。どちらかを具体的に案内する。
+      engineLog('音声が共有されていません。原因はたいてい次のどちらかです：'
+        + '①「ウィンドウ」を選んだ（Chromeはウィンドウ共有では音を取れません）→'
+        + '「Chromeのタブ」または「画面全体」を選び直してください。'
+        + '②共有ダイアログ左下の「タブの音声を共有」／「システムの音声を共有」に'
+        + 'チェックが入っていない', 'err');
       return;
     }
     for (const t of s.getVideoTracks()) t.stop();   // 映像は要らない
